@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MONSTER Touch</string>
+    <string name="accessibility_service_label">MONSTER Touch Controller</string>
+    <string name="accessibility_service_description">Maps controller or hardware keys to saved screen taps.</string>
+</resources>

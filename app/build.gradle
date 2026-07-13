@@ -1,0 +1,48 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.example.touchmapper"
+    compileSdk 35
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId "com.example.touchmapper"
+        minSdk 26
+        targetSdk 35
+        versionCode 46
+        versionName "A-0.1.38"
+        manifestPlaceholders = [
+                appIcon     : "@mipmap/ic_launcher",
+                appRoundIcon: "@mipmap/ic_launcher_round"
+        ]
+    }
+
+    flavorDimensions "branding"
+
+    productFlavors {
+        monster {
+            dimension "branding"
+            applicationId "com.example.touchmapper"
+            buildConfigField "boolean", "SHOW_BRANDING", "true"
+            manifestPlaceholders = [
+                    appIcon     : "@mipmap/ic_launcher",
+                    appRoundIcon: "@mipmap/ic_launcher_round"
+            ]
+        }
+
+        plain {
+            dimension "branding"
+            applicationId "com.example.touchmapper.plain"
+            buildConfigField "boolean", "SHOW_BRANDING", "false"
+            manifestPlaceholders = [
+                    appIcon     : "@drawable/ic_plain_launcher",
+                    appRoundIcon: "@drawable/ic_plain_launcher"
+            ]
+        }
+    }
+}

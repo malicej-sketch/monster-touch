@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">MONSTER Touch</string>
+    <string name="app_subtitle">시선은 도로에, 조작은 버튼으로</string>
+    <string name="accessibility_service_label">MONSTER Touch Controller</string>
+    <string name="accessibility_service_description">Maps controller or hardware keys to saved screen taps.</string>
+</resources>
