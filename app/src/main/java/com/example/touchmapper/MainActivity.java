@@ -6,10 +6,10 @@ import android.content.Intent;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.InputDevice;
-import android.view.KeyEvent;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -32,10 +32,10 @@ public class MainActivity extends Activity {
 
     private static MainActivity activeInstance;
 
-    private int captureSlot = -1;
     private LinearLayout mappingsContainer;
     private TextView statusText;
     private Button inputDeviceButton;
+    private TextView inputDeviceInfoText;
     private Button showPositionsButton;
 
     @Override
@@ -66,19 +66,6 @@ public class MainActivity extends Activity {
         if (activity != null) {
             activity.runOnUiThread(activity::renderMappings);
         }
-    }
-
-    @Override
-    public boolean dispatchKeyEvent(KeyEvent event) {
-        if (captureSlot < 0 || event.getAction() != KeyEvent.ACTION_DOWN) {
-            return super.dispatchKeyEvent(event);
-        }
-
-        MappingStore.saveKeyCode(this, captureSlot, event.getKeyCode());
-        Toast.makeText(this, "버튼 " + (captureSlot + 1) + " 키 저장: " + KeyEvent.keyCodeToString(event.getKeyCode()), Toast.LENGTH_SHORT).show();
-        captureSlot = -1;
-        renderMappings();
-        return true;
     }
 
     private void buildUi() {
@@ -161,6 +148,15 @@ public class MainActivity extends Activity {
         inputDeviceButton = makeButton("", 0xFFFFFFFF, COLOR_TEXT);
         inputDeviceButton.setOnClickListener(view -> showInputDevicePicker());
         root.addView(inputDeviceButton, matchWidthParams());
+
+        inputDeviceInfoText = new TextView(this);
+        inputDeviceInfoText.setTextSize(13f);
+        inputDeviceInfoText.setTextColor(COLOR_MUTED);
+        inputDeviceInfoText.setPadding(dp(12), dp(10), dp(12), dp(10));
+        inputDeviceInfoText.setBackground(roundedStroke(COLOR_SURFACE, dp(8), COLOR_BORDER, 1));
+        LinearLayout.LayoutParams deviceInfoParams = matchWidthParams();
+        deviceInfoParams.setMargins(0, 0, 0, dp(12));
+        root.addView(inputDeviceInfoText, deviceInfoParams);
 
         LinearLayout setupActions = new LinearLayout(this);
         setupActions.setOrientation(LinearLayout.HORIZONTAL);
@@ -246,7 +242,6 @@ public class MainActivity extends Activity {
                 .setNegativeButton("취소", null)
                 .setPositiveButton("초기화", (dialog, which) -> {
                     MappingStore.reset(this);
-                    captureSlot = -1;
                     renderMappings();
                     Toast.makeText(this, "초기화 완료", Toast.LENGTH_SHORT).show();
                 })
@@ -320,6 +315,9 @@ public class MainActivity extends Activity {
         if (inputDeviceButton != null) {
             inputDeviceButton.setText("입력 장치: " + inputDeviceLabel());
         }
+        if (inputDeviceInfoText != null) {
+            inputDeviceInfoText.setText(inputDeviceInfo());
+        }
         if (showPositionsButton != null) {
             showPositionsButton.setText(positionButtonLabel());
         }
@@ -361,15 +359,13 @@ public class MainActivity extends Activity {
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
 
-        Button captureButton = makeSmallButton(captureSlot == slot ? "키를 누르세요" : "키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
+        Button captureButton = makeSmallButton("키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
         captureButton.setOnClickListener(view -> {
             boolean started = TouchAccessibilityService.showInputCaptureOverlay(slot);
             if (started) {
-                captureSlot = -1;
-                Toast.makeText(this, "리모컨 버튼을 한 번 눌러주세요.", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "학습 화면 안내에 따라 리모컨 버튼을 눌러주세요.", Toast.LENGTH_SHORT).show();
             } else {
-                captureSlot = slot;
-                renderMappings();
+                showLearningUnavailableDialog();
             }
         });
         actions.addView(captureButton, utilityButtonParams());
@@ -378,10 +374,9 @@ public class MainActivity extends Activity {
         longCaptureButton.setOnClickListener(view -> {
             boolean started = TouchAccessibilityService.showInputCaptureOverlay(slot, true);
             if (started) {
-                captureSlot = -1;
                 Toast.makeText(this, "Press and hold the remote button.", Toast.LENGTH_SHORT).show();
             } else {
-                Toast.makeText(this, "Enable accessibility service first.", Toast.LENGTH_SHORT).show();
+                showLearningUnavailableDialog();
             }
         });
         actions.addView(longCaptureButton, utilityButtonParams());
@@ -419,7 +414,7 @@ public class MainActivity extends Activity {
 
     private String inputDeviceLabel() {
         if (!MappingStore.hasSelectedInputDevice(this)) {
-            return "모든 장치";
+            return "선택 안 됨";
         }
 
         String selectedDescriptor = MappingStore.selectedInputDeviceDescriptor(this);
@@ -429,6 +424,20 @@ public class MainActivity extends Activity {
             }
         }
         return MappingStore.selectedInputDeviceName(this) + " (연결 안 됨)";
+    }
+
+    private String inputDeviceInfo() {
+        if (!MappingStore.hasSelectedInputDevice(this)) {
+            return "장치를 선택하면 안드로이드 입력 분류와 처리 방법을 표시합니다.";
+        }
+
+        InputDevice device = selectedInputDevice();
+        if (device == null) {
+            return "안드로이드 분류: 연결 후 확인\n처리 안내: 컨트롤러가 다시 연결될 때까지 모든 기능이 중지됩니다.";
+        }
+
+        return "안드로이드 분류: " + inputSourceLabel(device.getSources())
+                + "\n처리 안내: " + inputStrategyLabel(device.getSources());
     }
 
     private void showProfilePicker() {
@@ -449,25 +458,24 @@ public class MainActivity extends Activity {
 
     private void showInputDevicePicker() {
         List<InputDevice> devices = inputDevices();
-        String[] labels = new String[devices.size() + 1];
-        labels[0] = "모든 장치";
+        if (devices.isEmpty()) {
+            Toast.makeText(this, "연결된 컨트롤러를 찾지 못했습니다.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String[] labels = new String[devices.size()];
         for (int index = 0; index < devices.size(); index++) {
             InputDevice device = devices.get(index);
-            labels[index + 1] = device.getName();
+            labels[index] = device.getName() + "\n안드로이드 분류: " + inputSourceLabel(device.getSources());
         }
 
         new AlertDialog.Builder(this)
                 .setTitle("입력 장치 선택")
                 .setItems(labels, (dialog, which) -> {
-                    if (which == 0) {
-                        MappingStore.selectAllInputDevices(this);
-                        Toast.makeText(this, "모든 장치 입력을 허용합니다.", Toast.LENGTH_SHORT).show();
-                    } else {
-                        InputDevice device = devices.get(which - 1);
-                        MappingStore.saveInputDevice(this, device.getDescriptor(), device.getName(),
-                                device.getVendorId(), device.getProductId());
-                        Toast.makeText(this, device.getName() + "만 사용합니다.", Toast.LENGTH_SHORT).show();
-                    }
+                    InputDevice device = devices.get(which);
+                    MappingStore.saveInputDevice(this, device.getDescriptor(), device.getName(),
+                            device.getVendorId(), device.getProductId());
+                    Toast.makeText(this, device.getName() + "만 사용합니다.", Toast.LENGTH_SHORT).show();
                     TouchAccessibilityService.refreshMotionCapture();
                     renderMappings();
                 })
@@ -498,6 +506,67 @@ public class MainActivity extends Activity {
         return devices;
     }
 
+    private InputDevice selectedInputDevice() {
+        String selectedDescriptor = MappingStore.selectedInputDeviceDescriptor(this);
+        if (selectedDescriptor.isEmpty()) {
+            return null;
+        }
+        for (InputDevice device : inputDevices()) {
+            if (MappingStore.acceptsInputDevice(this, device.getDescriptor(), device.getName(),
+                    device.getVendorId(), device.getProductId())) {
+                return device;
+            }
+        }
+        return null;
+    }
+
+    private String inputSourceLabel(int sources) {
+        List<String> labels = new ArrayList<>();
+        addSourceLabel(labels, sources, InputDevice.SOURCE_KEYBOARD, "키보드");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_DPAD, "방향키");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_GAMEPAD, "게임패드");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_MOUSE, "마우스");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_MOUSE_RELATIVE, "상대 마우스");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_TOUCHPAD, "터치패드");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_TOUCHSCREEN, "터치스크린");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_TRACKBALL, "트랙볼");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_JOYSTICK, "조이스틱");
+        addSourceLabel(labels, sources, InputDevice.SOURCE_ROTARY_ENCODER, "회전 입력");
+        return labels.isEmpty() ? "기타 입력 (0x" + Integer.toHexString(sources) + ")"
+                : String.join(" · ", labels);
+    }
+
+    private void addSourceLabel(List<String> labels, int sources, int source, String label) {
+        if ((sources & source) == source) {
+            labels.add(label);
+        }
+    }
+
+    private String inputStrategyLabel(int sources) {
+        boolean keyboard = (sources & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD;
+        boolean touchscreen = (sources & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN;
+        boolean capturableMotion = (sources & (InputDevice.SOURCE_MOUSE
+                | InputDevice.SOURCE_MOUSE_RELATIVE
+                | InputDevice.SOURCE_TOUCHPAD
+                | InputDevice.SOURCE_TRACKBALL
+                | InputDevice.SOURCE_JOYSTICK
+                | InputDevice.SOURCE_ROTARY_ENCODER)) != 0;
+
+        if (touchscreen) {
+            return "부분 화면 트랩" + (keyboard ? " + 키 이벤트" : "")
+                    + "\n안전: 전체 화면 터치는 차단하지 않습니다.";
+        }
+        if (capturableMotion) {
+            return Build.VERSION.SDK_INT >= 34
+                    ? "모션 캡처 (setMotionEventSources)" + (keyboard ? " + 키 이벤트" : "")
+                    : "화면 트랩 방식" + (keyboard ? " + 키 이벤트" : "");
+        }
+        if (keyboard) {
+            return "키 이벤트 (onKeyEvent)";
+        }
+        return "입력 학습 후 처리 방법 결정";
+    }
+
     private boolean isUsableInputDevice(InputDevice device) {
         if (device.isVirtual()) {
             return false;
@@ -510,8 +579,13 @@ public class MainActivity extends Activity {
         boolean joystick = (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
         boolean mouse = (sources & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
         boolean touchpad = (sources & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD;
+        boolean externalTouchscreen = device.isExternal()
+                && (sources & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN;
         boolean trackball = (sources & InputDevice.SOURCE_TRACKBALL) == InputDevice.SOURCE_TRACKBALL;
-        return keyboard || gamepad || dpad || joystick || mouse || touchpad || trackball;
+        boolean rotary = (sources & InputDevice.SOURCE_ROTARY_ENCODER) == InputDevice.SOURCE_ROTARY_ENCODER;
+        boolean button = (sources & InputDevice.SOURCE_CLASS_BUTTON) == InputDevice.SOURCE_CLASS_BUTTON;
+        return keyboard || gamepad || dpad || joystick || mouse || touchpad || externalTouchscreen
+                || trackball || rotary || button;
     }
 
     private void showProfileNameEditor() {
@@ -527,6 +601,16 @@ public class MainActivity extends Activity {
             TouchAccessibilityService.refreshPositionOverlay();
             renderMappings();
         });
+    }
+
+    private void showLearningUnavailableDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("입력 학습을 시작할 수 없음")
+                .setMessage("접근성 서비스가 실행 중인지, 선택한 컨트롤러가 연결되어 있는지 확인해주세요. 기존 설정은 변경되지 않았습니다.")
+                .setNegativeButton("닫기", null)
+                .setPositiveButton("접근성 설정", (dialog, which) ->
+                        startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
+                .show();
     }
 
     private void showNameEditor(String title, String currentValue, NameSaveListener listener) {

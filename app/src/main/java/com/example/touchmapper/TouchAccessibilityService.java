@@ -10,6 +10,7 @@ import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.input.InputManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -43,13 +44,23 @@ public class TouchAccessibilityService extends AccessibilityService {
     private static final long MOVE_MARKER_LONG_PRESS_MS = 1000L;
     private static final long REMOTE_GESTURE_COOLDOWN_MS = 220L;
     private static final long VOLUME_KEY_DEBOUNCE_MS = 1000L;
+    private static final long INPUT_CAPTURE_KEY_GRACE_MS = 750L;
     private static final int POSITION_TOGGLE_SLOT = 0;
     private static final int INPUT_CAPTURE_SAMPLE_TARGET = 5;
+    private static final int CONTROLLER_MOTION_SOURCES = InputDevice.SOURCE_MOUSE
+            | InputDevice.SOURCE_MOUSE_RELATIVE
+            | InputDevice.SOURCE_TOUCHPAD
+            | InputDevice.SOURCE_TRACKBALL
+            | InputDevice.SOURCE_JOYSTICK
+            | InputDevice.SOURCE_ROTARY_ENCODER;
     private static TouchAccessibilityService instance;
     private static boolean configurationActive;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private WindowManager windowManager;
+    private InputManager inputManager;
+    private String activeControllerDescriptor = "";
+    private boolean selectedControllerConnected;
     private View pickerOverlay;
     private View setupOverlay;
     private WindowManager.LayoutParams setupOverlayParams;
@@ -57,6 +68,8 @@ public class TouchAccessibilityService extends AccessibilityService {
     private int inputCaptureSlot = -1;
     private boolean inputCaptureLongMode;
     private int inputCaptureKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+    private int inputCapturePendingKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+    private boolean inputCaptureMotionObserved;
     private boolean inputCaptureMotionActive;
     private float inputCaptureDownX;
     private float inputCaptureDownY;
@@ -68,6 +81,15 @@ public class TouchAccessibilityService extends AccessibilityService {
     private int inputCaptureSampleDirection = MappingStore.TRIGGER_UNKNOWN;
     private final List<String> inputCaptureSampleSignatures = new ArrayList<>();
     private TextView inputCaptureStatus;
+    private final Runnable finishPendingInputCaptureKeyRunnable = () -> {
+        if (inputCaptureSlot < 0 || inputCaptureMotionObserved
+                || inputCapturePendingKeyCode == KeyEvent.KEYCODE_UNKNOWN) {
+            return;
+        }
+        int keyCode = inputCapturePendingKeyCode;
+        inputCapturePendingKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        finishInputCaptureWithKey(keyCode);
+    };
     private View keyDiagnosticOverlay;
     private WindowManager.LayoutParams keyDiagnosticOverlayParams;
     private TextView keyDiagnosticLog;
@@ -134,6 +156,22 @@ public class TouchAccessibilityService extends AccessibilityService {
                 longClickTriggered = true;
                 toggleTouchLock();
             }
+        }
+    };
+    private final InputManager.InputDeviceListener inputDeviceListener = new InputManager.InputDeviceListener() {
+        @Override
+        public void onInputDeviceAdded(int deviceId) {
+            refreshSelectedControllerState();
+        }
+
+        @Override
+        public void onInputDeviceRemoved(int deviceId) {
+            refreshSelectedControllerState();
+        }
+
+        @Override
+        public void onInputDeviceChanged(int deviceId) {
+            refreshSelectedControllerState();
         }
     };
 
@@ -271,7 +309,7 @@ public class TouchAccessibilityService extends AccessibilityService {
             return true;
         }
 
-        if (Build.VERSION.SDK_INT >= 34) {
+        if (Build.VERSION.SDK_INT >= 34 && !service.selectedDeviceUsesTouchscreen()) {
             service.remoteTrapVisible = false;
             service.hideRemoteTrapOverlay();
             service.updateMotionCapture();
@@ -471,13 +509,17 @@ public class TouchAccessibilityService extends AccessibilityService {
     public void onServiceConnected() {
         instance = this;
         windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-        updateMotionCapture();
+        inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        if (inputManager != null) {
+            inputManager.registerInputDeviceListener(inputDeviceListener, mainHandler);
+        }
+        refreshSelectedControllerState();
     }
 
     static void refreshMotionCapture() {
         TouchAccessibilityService service = instance;
         if (service != null) {
-            service.updateMotionCapture();
+            service.refreshSelectedControllerState();
         }
     }
 
@@ -485,15 +527,13 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (Build.VERSION.SDK_INT >= 34) {
             AccessibilityServiceInfo info = getServiceInfo();
             if (info != null) {
-                boolean enable = adbProbeOverlay != null
+                boolean enable = selectedControllerConnected && (adbProbeOverlay != null
                         || controllerAnalyzerOverlay != null
                         || controllerDiagnosticOverlay != null
                         || motionDiagnosticOverlay != null
                         || inputCaptureSlot >= 0
-                        || MappingStore.hasSelectedInputDevice(this);
-                info.setMotionEventSources(enable
-                        ? InputDevice.SOURCE_MOUSE | InputDevice.SOURCE_MOUSE_RELATIVE
-                        : 0);
+                        || MappingStore.hasSelectedInputDevice(this));
+                info.setMotionEventSources(enable ? CONTROLLER_MOTION_SOURCES : 0);
                 setServiceInfo(info);
             }
         }
@@ -501,6 +541,10 @@ public class TouchAccessibilityService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        if (inputManager != null) {
+            inputManager.unregisterInputDeviceListener(inputDeviceListener);
+            inputManager = null;
+        }
         hidePointPicker();
         hideSetupPanel();
         hideInputCapturePanel();
@@ -516,6 +560,79 @@ public class TouchAccessibilityService extends AccessibilityService {
             instance = null;
         }
         super.onDestroy();
+    }
+
+    private void refreshSelectedControllerState() {
+        String selectedDescriptor = MappingStore.selectedInputDeviceDescriptor(this);
+        boolean deviceChanged = !selectedDescriptor.equals(activeControllerDescriptor);
+        boolean wasConnected = selectedControllerConnected;
+        InputDevice selectedDevice = findSelectedInputDevice();
+
+        if (deviceChanged) {
+            stopControllerFeatures();
+            activeControllerDescriptor = selectedDescriptor;
+        }
+
+        selectedControllerConnected = !selectedDescriptor.isEmpty() && selectedDevice != null;
+        if (!selectedControllerConnected) {
+            if (wasConnected && !deviceChanged) {
+                stopControllerFeatures();
+                Toast.makeText(this, "컨트롤러 연결이 끊겨 기능을 중지했습니다.", Toast.LENGTH_SHORT).show();
+            }
+            updateMotionCapture();
+            MainActivity.refreshIfVisible();
+            return;
+        }
+
+        updateMotionCapture();
+        boolean touchscreenController = (selectedDevice.getSources() & InputDevice.SOURCE_TOUCHSCREEN)
+                == InputDevice.SOURCE_TOUCHSCREEN;
+        if (touchscreenController && isSelectedDeviceMotionMode()) {
+            rebuildSelectedControllerTrapZones();
+            MappingStore.saveTrapMode(this, MappingStore.TRAP_MODE_AUTO);
+            remoteTrapVisible = true;
+            showRemoteTrapOverlay();
+        } else if (!remoteTrapOverlays.isEmpty()) {
+            remoteTrapVisible = false;
+            hideRemoteTrapOverlay();
+        }
+        if (!wasConnected && !deviceChanged) {
+            Toast.makeText(this, "컨트롤러가 다시 연결되었습니다.", Toast.LENGTH_SHORT).show();
+        }
+        MainActivity.refreshIfVisible();
+    }
+
+    private InputDevice findSelectedInputDevice() {
+        if (!MappingStore.hasSelectedInputDevice(this)) {
+            return null;
+        }
+        for (int deviceId : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(deviceId);
+            if (device != null && MappingStore.acceptsInputDevice(this, device.getDescriptor(), device.getName(),
+                    device.getVendorId(), device.getProductId())) {
+                return device;
+            }
+        }
+        return null;
+    }
+
+    private void stopControllerFeatures() {
+        selectedControllerConnected = false;
+        remoteTrapVisible = false;
+        touchLocked = false;
+        positionsVisible = false;
+        mainHandler.removeCallbacks(lockLongClickRunnable);
+        hidePointPicker();
+        hideSetupPanel();
+        hideInputCapturePanel();
+        hideKeyDiagnosticPanel();
+        hideMotionDiagnosticPanel();
+        hideControllerAnalyzerPanel();
+        hideControllerDiagnosticPanel();
+        hideAdbProbePanel();
+        hidePositionOverlay();
+        hideTouchLockOverlay();
+        hideRemoteTrapOverlay();
     }
 
     @Override
@@ -581,17 +698,32 @@ public class TouchAccessibilityService extends AccessibilityService {
     }
 
     private boolean handleInputCaptureKeyEvent(KeyEvent event) {
+        if (!acceptsInputDevice(event.getDevice())) {
+            return false;
+        }
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
             inputCaptureKeyCode = event.getKeyCode();
             return true;
         }
 
         if (event.getAction() == KeyEvent.ACTION_UP) {
-            int keyCode = inputCaptureKeyCode == KeyEvent.KEYCODE_UNKNOWN
-                    ? event.getKeyCode()
-                    : inputCaptureKeyCode;
-            recordInputCaptureSample("", MappingStore.TRIGGER_UNKNOWN, keyCode);
+            if (inputCaptureKeyCode == KeyEvent.KEYCODE_UNKNOWN
+                    || inputCaptureKeyCode != event.getKeyCode()) {
+                return true;
+            }
+            int keyCode = inputCaptureKeyCode;
             inputCaptureKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+            if (inputCaptureLongMode || !selectedDeviceSupportsMotionLearning()) {
+                finishInputCaptureWithKey(keyCode);
+                return true;
+            }
+            if (inputCaptureMotionObserved) {
+                return true;
+            }
+            inputCapturePendingKeyCode = keyCode;
+            mainHandler.removeCallbacks(finishPendingInputCaptureKeyRunnable);
+            mainHandler.postDelayed(finishPendingInputCaptureKeyRunnable, INPUT_CAPTURE_KEY_GRACE_MS);
+            updateInputCaptureStatus();
             return true;
         }
 
@@ -602,8 +734,20 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (inputCaptureSlot < 0) {
             return false;
         }
+        if (!acceptsInputDevice(event.getDevice())) {
+            return false;
+        }
 
         boolean finished = inputCaptureBurst.record(event);
+        if (!inputCaptureBurst.active && !finished) {
+            return true;
+        }
+        if (!inputCaptureMotionObserved) {
+            inputCaptureMotionObserved = true;
+            inputCapturePendingKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+            mainHandler.removeCallbacks(finishPendingInputCaptureKeyRunnable);
+            updateInputCaptureStatus();
+        }
         if (!finished) {
             return true;
         }
@@ -656,11 +800,16 @@ public class TouchAccessibilityService extends AccessibilityService {
             MappingStore.saveMouseGesture(this, slot, direction, signature);
         }
         MappingStore.saveInputDeviceMode(this, MappingStore.DEVICE_MODE_MOTION);
-        MappingStore.saveTrapMode(this, MappingStore.TRAP_MODE_FULL_SCREEN);
-        if (Build.VERSION.SDK_INT < 34 && !remoteTrapVisible) {
+        if (selectedDeviceUsesTouchscreen()) {
+            rebuildSelectedControllerTrapZones();
+        }
+        MappingStore.saveTrapMode(this, MappingStore.TRAP_MODE_AUTO);
+        boolean needsTrapOverlay = Build.VERSION.SDK_INT < 34
+                || selectedDeviceUsesTouchscreen();
+        if (needsTrapOverlay && !remoteTrapVisible) {
             remoteTrapVisible = true;
         }
-        if (Build.VERSION.SDK_INT < 34 && remoteTrapVisible) {
+        if (needsTrapOverlay && remoteTrapVisible) {
             hideRemoteTrapOverlay();
             showRemoteTrapOverlay();
         }
@@ -727,8 +876,26 @@ public class TouchAccessibilityService extends AccessibilityService {
         int unique = inputCaptureSampleSignatures.isEmpty() && inputCaptureSampleKeyCode != KeyEvent.KEYCODE_UNKNOWN
                 ? 1
                 : inputCaptureSampleSignatures.size();
-        inputCaptureStatus.setText("Sample " + inputCaptureSampleAttempts + "/" + inputCaptureSampleTarget
-                + "  Unique " + unique + "\nPress the same remote button 5 times.");
+        if (inputCapturePendingKeyCode != KeyEvent.KEYCODE_UNKNOWN && !inputCaptureMotionObserved) {
+            inputCaptureStatus.setText("키 신호 감지 · 모션 신호를 잠시 확인하고 있습니다.");
+        } else if (inputCaptureLongMode || !selectedDeviceSupportsMotionLearning()) {
+            inputCaptureStatus.setText("버튼을 한 번 눌렀다가 떼세요.");
+        } else if (inputCaptureSampleAttempts == 0) {
+            inputCaptureStatus.setText("같은 버튼을 5번 눌러주세요.\n모션 샘플 0/5 · 고유 신호 0");
+        } else {
+            inputCaptureStatus.setText("모션 샘플 " + inputCaptureSampleAttempts + "/" + inputCaptureSampleTarget
+                    + " · 고유 신호 " + unique);
+        }
+    }
+
+    private boolean selectedDeviceSupportsMotionLearning() {
+        InputDevice device = findSelectedInputDevice();
+        if (device == null) {
+            return false;
+        }
+        int sources = device.getSources();
+        int motionSources = CONTROLLER_MOTION_SOURCES | InputDevice.SOURCE_TOUCHSCREEN;
+        return (sources & motionSources) != 0;
     }
 
     private boolean handleKeyDiagnosticEvent(KeyEvent event, InputDevice inputDevice, String descriptor) {
@@ -1037,11 +1204,12 @@ public class TouchAccessibilityService extends AccessibilityService {
             Toast.makeText(this, "Next: button " + adbProbeCurrentButton, Toast.LENGTH_SHORT).show();
             return;
         }
-        MappingStore.saveTrapMode(this, MappingStore.TRAP_MODE_FULL_SCREEN);
-        if (Build.VERSION.SDK_INT < 34 && !remoteTrapVisible) {
+        MappingStore.saveTrapMode(this, MappingStore.TRAP_MODE_AUTO);
+        boolean needsTrapOverlay = Build.VERSION.SDK_INT < 34 || selectedDeviceUsesTouchscreen();
+        if (needsTrapOverlay && !remoteTrapVisible) {
             remoteTrapVisible = true;
         }
-        if (Build.VERSION.SDK_INT < 34) {
+        if (needsTrapOverlay) {
             hideRemoteTrapOverlay();
             showRemoteTrapOverlay();
         } else {
@@ -1473,6 +1641,92 @@ public class TouchAccessibilityService extends AccessibilityService {
         return new RectF(left, top, Math.max(left + 1f, right), Math.max(top + 1f, bottom));
     }
 
+    private void rebuildSelectedControllerTrapZones() {
+        List<RectF> anchorZones = new ArrayList<>();
+        for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
+            MappingStore.Mapping mapping = MappingStore.get(this, slot);
+            if (mapping.triggerType == MappingStore.TRIGGER_MOUSE_GESTURE) {
+                addSignatureAnchorZones(anchorZones, mapping.triggerSignature);
+            }
+            if (mapping.longTriggerType == MappingStore.TRIGGER_MOUSE_GESTURE) {
+                addSignatureAnchorZones(anchorZones, mapping.longTriggerSignature);
+            }
+        }
+        if (anchorZones.isEmpty()) {
+            return;
+        }
+
+        List<MappingStore.TrapZone> zones = new ArrayList<>();
+        for (RectF zone : anchorZones) {
+            zones.add(new MappingStore.TrapZone(
+                    Math.round(zone.left),
+                    Math.round(zone.top),
+                    Math.max(1, Math.round(zone.width())),
+                    Math.max(1, Math.round(zone.height()))
+            ));
+        }
+        MappingStore.saveTrapZones(this, zones);
+    }
+
+    private void addSignatureAnchorZones(List<RectF> zones, String signatures) {
+        if (signatures == null || signatures.trim().isEmpty()) {
+            return;
+        }
+        for (String signature : signatures.split("\\n")) {
+            RectF zone = anchorZoneFromSignature(signature);
+            if (zone == null) {
+                continue;
+            }
+            boolean merged = false;
+            for (RectF saved : zones) {
+                if (RectF.intersects(saved, zone)) {
+                    saved.union(zone);
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged && zones.size() < MappingStore.MAX_TRAP_ZONES) {
+                zones.add(zone);
+            }
+        }
+    }
+
+    private RectF anchorZoneFromSignature(String signature) {
+        int anchorStart = signature == null ? -1 : signature.indexOf("|a=");
+        if (anchorStart < 0) {
+            return null;
+        }
+        anchorStart += 3;
+        int anchorEnd = signature.indexOf('|', anchorStart);
+        String anchor = anchorEnd < 0
+                ? signature.substring(anchorStart)
+                : signature.substring(anchorStart, anchorEnd);
+        String[] values = anchor.split(",", 2);
+        if (values.length != 2) {
+            return null;
+        }
+
+        int xBin;
+        int yBin;
+        try {
+            xBin = Math.max(0, Math.min(11, Integer.parseInt(values[0].trim())));
+            yBin = Math.max(0, Math.min(15, Integer.parseInt(values[1].trim())));
+        } catch (NumberFormatException exception) {
+            return null;
+        }
+
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        float centerX = (xBin + 0.5f) * screenWidth / 12f;
+        float centerY = (yBin + 0.5f) * screenHeight / 16f;
+        float halfSize = dp(72);
+        float left = Math.max(0f, centerX - halfSize);
+        float top = Math.max(0f, centerY - halfSize);
+        float right = Math.min(screenWidth, centerX + halfSize);
+        float bottom = Math.min(screenHeight, centerY + halfSize);
+        return new RectF(left, top, Math.max(left + 1f, right), Math.max(top + 1f, bottom));
+    }
+
     private void addOrMergeControllerZone(RectF newZone) {
         float mergeMargin = dp(48);
         for (RectF zone : controllerDiagnosticZones) {
@@ -1611,6 +1865,9 @@ public class TouchAccessibilityService extends AccessibilityService {
             mapping = MappingStore.findByMouseSignature(this, direction, signature);
         }
         if (mapping == null) {
+            mapping = findClosestMappedMouseGesture(direction, signature, false);
+        }
+        if (mapping == null) {
             mapping = MappingStore.findByMouseGesture(this, direction);
         }
         if (mapping != null) {
@@ -1621,6 +1878,9 @@ public class TouchAccessibilityService extends AccessibilityService {
                 longMapping = MappingStore.findByLongMouseSignature(this, direction, signature);
             }
             if (longMapping == null) {
+                longMapping = findClosestMappedMouseGesture(direction, signature, true);
+            }
+            if (longMapping == null) {
                 longMapping = MappingStore.findByLongMouseGesture(this, direction);
             }
             if (longMapping != null) {
@@ -1628,6 +1888,33 @@ public class TouchAccessibilityService extends AccessibilityService {
             }
         }
         return true;
+    }
+
+    private MappingStore.Mapping findClosestMappedMouseGesture(int direction, String signature, boolean longMode) {
+        if (signature == null || signature.trim().isEmpty()) {
+            return null;
+        }
+
+        MappingStore.Mapping best = null;
+        int bestScore = Integer.MAX_VALUE;
+        for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
+            MappingStore.Mapping mapping = MappingStore.get(this, slot);
+            int triggerType = longMode ? mapping.longTriggerType : mapping.triggerType;
+            int triggerValue = longMode ? mapping.longTriggerValue : mapping.triggerValue;
+            String savedSignatures = longMode ? mapping.longTriggerSignature : mapping.triggerSignature;
+            if (triggerType != MappingStore.TRIGGER_MOUSE_GESTURE || triggerValue != direction) {
+                continue;
+            }
+
+            for (String savedSignature : savedSignatures.split("\\n")) {
+                int score = burstSignatureDistance(signature, savedSignature.trim());
+                if (score >= 0 && score < bestScore) {
+                    best = mapping;
+                    bestScore = score;
+                }
+            }
+        }
+        return bestScore <= 5 ? best : null;
     }
 
     private MappingStore.Mapping findMouseMappingByAnchorSignature(int direction, String signature, boolean longMode) {
@@ -1728,8 +2015,35 @@ public class TouchAccessibilityService extends AccessibilityService {
         int source = event.getSource();
         boolean mouse = (source & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE;
         boolean relativeMouse = (source & InputDevice.SOURCE_MOUSE_RELATIVE) == InputDevice.SOURCE_MOUSE_RELATIVE;
+        boolean touchpad = (source & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD;
+        boolean trackball = (source & InputDevice.SOURCE_TRACKBALL) == InputDevice.SOURCE_TRACKBALL;
+        boolean joystick = (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+        boolean rotary = (source & InputDevice.SOURCE_ROTARY_ENCODER) == InputDevice.SOURCE_ROTARY_ENCODER;
+        boolean touchscreen = (source & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN;
         boolean pointer = (source & InputDevice.SOURCE_CLASS_POINTER) == InputDevice.SOURCE_CLASS_POINTER;
-        return (mouse || relativeMouse || pointer) && acceptsInputDevice(inputDevice);
+        return (mouse || relativeMouse || touchpad || trackball || joystick || rotary || touchscreen || pointer)
+                && acceptsInputDevice(inputDevice);
+    }
+
+    private boolean selectedDeviceUsesTouchscreen() {
+        String selectedDescriptor = MappingStore.selectedInputDeviceDescriptor(this);
+        if (selectedDescriptor.isEmpty()) {
+            return false;
+        }
+        for (int deviceId : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(deviceId);
+            if (device == null || !selectedDescriptor.equals(device.getDescriptor())) {
+                continue;
+            }
+            int sources = device.getSources();
+            return (sources & InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN;
+        }
+        return false;
+    }
+
+    private boolean isSelectedDeviceMotionMode() {
+        int mode = MappingStore.inputDeviceMode(this);
+        return mode == MappingStore.DEVICE_MODE_MOTION || mode == MappingStore.DEVICE_MODE_MIXED;
     }
 
     private int remoteGestureSlot(float startX, float startY, float endX, float endY) {
@@ -2134,6 +2448,9 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureSlot = Math.max(0, Math.min(MappingStore.SLOT_COUNT - 1, slot));
         inputCaptureLongMode = longMode;
         inputCaptureKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        inputCapturePendingKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        inputCaptureMotionObserved = false;
+        mainHandler.removeCallbacks(finishPendingInputCaptureKeyRunnable);
         inputCaptureMotionActive = false;
         inputCaptureMotionSignature = "";
         inputCaptureBurst.reset();
@@ -2169,7 +2486,9 @@ public class TouchAccessibilityService extends AccessibilityService {
         panel.addView(title, panelParams());
 
         TextView help = new TextView(this);
-        help.setText("리모컨 버튼을 한 번 눌렀다가 떼세요.\n키 입력은 UP까지, 마우스 입력은 DOWN부터 UP까지 한 세트로 저장합니다.");
+        help.setText(!longMode && selectedDeviceSupportsMotionLearning()
+                ? "같은 리모컨 버튼을 5번 눌렀다가 떼세요.\n서로 다른 모션 신호를 모두 한 버튼으로 저장합니다."
+                : "리모컨 버튼을 한 번 눌렀다가 떼세요.\n키 입력은 DOWN부터 UP까지 한 세트로 저장합니다.");
         help.setTextColor(0xFF657282);
         help.setTextSize(13f);
         help.setGravity(Gravity.CENTER);
@@ -2620,6 +2939,9 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureSlot = -1;
         inputCaptureLongMode = false;
         inputCaptureKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        inputCapturePendingKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        inputCaptureMotionObserved = false;
+        mainHandler.removeCallbacks(finishPendingInputCaptureKeyRunnable);
         inputCaptureMotionActive = false;
         inputCaptureMotionSignature = "";
         inputCaptureBurst.reset();
@@ -2720,19 +3042,6 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
 
         int inputMode = MappingStore.inputDeviceMode(this);
-        if ((inputMode == MappingStore.DEVICE_MODE_MOTION || inputMode == MappingStore.DEVICE_MODE_MIXED)
-                && MappingStore.isFullScreenTrapMode(this)) {
-            addRemoteTrapView(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    Gravity.TOP | Gravity.START,
-                    0,
-                    0
-            );
-            updateMotionCapture();
-            return;
-        }
-
         List<MappingStore.TrapZone> savedZones = MappingStore.trapZones(this);
         if ((inputMode == MappingStore.DEVICE_MODE_MOTION || inputMode == MappingStore.DEVICE_MODE_MIXED)
                 && !savedZones.isEmpty()) {

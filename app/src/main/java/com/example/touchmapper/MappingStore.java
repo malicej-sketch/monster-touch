@@ -43,6 +43,8 @@ final class MappingStore {
     private static final String INPUT_DEVICE_VENDOR_ID = "input_device_vendor_id";
     private static final String INPUT_DEVICE_PRODUCT_ID = "input_device_product_id";
     private static final String INPUT_DEVICE_MODE = "input_device_mode";
+    private static final String INPUT_BINDINGS_MIGRATED = "input_bindings_migrated_v2";
+    private static final String CONTROLLER_SETTINGS_MIGRATED = "controller_settings_migrated_v3";
     private static final String TRAP_MODE = "trap_mode";
     private static final String TRAP_ZONE_COUNT = "trap_zone_count";
     private static final String TRAP_ZONE_X = "trap_zone_x_";
@@ -77,11 +79,15 @@ final class MappingStore {
     }
 
     static int currentProfile(Context context) {
-        return clampProfile(prefs(context).getInt(CURRENT_PROFILE, 0));
+        ensureControllerSettingsMigrated(context);
+        return clampProfile(prefs(context).getInt(devicePreferenceKey(CURRENT_PROFILE, context), 0));
     }
 
     static void setCurrentProfile(Context context, int profile) {
-        prefs(context).edit().putInt(CURRENT_PROFILE, clampProfile(profile)).apply();
+        ensureControllerSettingsMigrated(context);
+        prefs(context).edit()
+                .putInt(devicePreferenceKey(CURRENT_PROFILE, context), clampProfile(profile))
+                .apply();
     }
 
     static String profileName(Context context) {
@@ -89,13 +95,17 @@ final class MappingStore {
     }
 
     static String profileName(Context context, int profile) {
+        ensureControllerSettingsMigrated(context);
         int safeProfile = clampProfile(profile);
-        return prefs(context).getString(PROFILE_NAME + safeProfile, DEFAULT_PROFILE_NAMES[safeProfile]);
+        return prefs(context).getString(
+                devicePreferenceKey(PROFILE_NAME + safeProfile, context), DEFAULT_PROFILE_NAMES[safeProfile]);
     }
 
     static void saveProfileName(Context context, String name) {
         String cleanName = cleanName(name, profileName(context));
-        prefs(context).edit().putString(PROFILE_NAME + currentProfile(context), cleanName).apply();
+        prefs(context).edit()
+                .putString(devicePreferenceKey(PROFILE_NAME + currentProfile(context), context), cleanName)
+                .apply();
     }
 
     static String buttonName(Context context, int slot) {
@@ -108,22 +118,20 @@ final class MappingStore {
     }
 
     static Mapping get(Context context, int slot) {
+        ensureInputBindingsMigrated(context);
         SharedPreferences prefs = prefs(context);
         int safeSlot = clampSlot(slot);
-        int keyCode = prefs.getInt(profileKey(KEY_CODE, context, safeSlot),
-                prefs.getInt(KEY_CODE + safeSlot, KeyEvent.KEYCODE_UNKNOWN));
-        int triggerType = prefs.getInt(profileKey(TRIGGER_TYPE, context, safeSlot),
+        int keyCode = prefs.getInt(inputProfileKey(KEY_CODE, context, safeSlot), KeyEvent.KEYCODE_UNKNOWN);
+        int triggerType = prefs.getInt(inputProfileKey(TRIGGER_TYPE, context, safeSlot),
                 keyCode == KeyEvent.KEYCODE_UNKNOWN ? TRIGGER_UNKNOWN : TRIGGER_KEY);
-        int triggerValue = prefs.getInt(profileKey(TRIGGER_VALUE, context, safeSlot),
+        int triggerValue = prefs.getInt(inputProfileKey(TRIGGER_VALUE, context, safeSlot),
                 keyCode == KeyEvent.KEYCODE_UNKNOWN ? TRIGGER_UNKNOWN : keyCode);
-        String triggerSignature = prefs.getString(profileKey(TRIGGER_SIGNATURE, context, safeSlot), "");
-        int longTriggerType = prefs.getInt(profileKey(LONG_TRIGGER_TYPE, context, safeSlot), TRIGGER_UNKNOWN);
-        int longTriggerValue = prefs.getInt(profileKey(LONG_TRIGGER_VALUE, context, safeSlot), TRIGGER_UNKNOWN);
-        String longTriggerSignature = prefs.getString(profileKey(LONG_TRIGGER_SIGNATURE, context, safeSlot), "");
-        float x = prefs.getFloat(profileKey(X, context, safeSlot),
-                prefs.getFloat(legacyTriggerKey(X, safeSlot), prefs.getFloat(X + safeSlot, -1f)));
-        float y = prefs.getFloat(profileKey(Y, context, safeSlot),
-                prefs.getFloat(legacyTriggerKey(Y, safeSlot), prefs.getFloat(Y + safeSlot, -1f)));
+        String triggerSignature = prefs.getString(inputProfileKey(TRIGGER_SIGNATURE, context, safeSlot), "");
+        int longTriggerType = prefs.getInt(inputProfileKey(LONG_TRIGGER_TYPE, context, safeSlot), TRIGGER_UNKNOWN);
+        int longTriggerValue = prefs.getInt(inputProfileKey(LONG_TRIGGER_VALUE, context, safeSlot), TRIGGER_UNKNOWN);
+        String longTriggerSignature = prefs.getString(inputProfileKey(LONG_TRIGGER_SIGNATURE, context, safeSlot), "");
+        float x = prefs.getFloat(profileKey(X, context, safeSlot), -1f);
+        float y = prefs.getFloat(profileKey(Y, context, safeSlot), -1f);
         return new Mapping(safeSlot, keyCode, triggerType, triggerValue,
                 triggerSignature, longTriggerType, longTriggerValue, longTriggerSignature,
                 buttonName(context, safeSlot), x, y);
@@ -188,12 +196,13 @@ final class MappingStore {
     }
 
     static void saveKeyCode(Context context, int slot, int keyCode, String signature) {
+        ensureInputBindingsMigrated(context);
         int safeSlot = clampSlot(slot);
         prefs(context).edit()
-                .putInt(profileKey(KEY_CODE, context, safeSlot), keyCode)
-                .putInt(profileKey(TRIGGER_TYPE, context, safeSlot), TRIGGER_KEY)
-                .putInt(profileKey(TRIGGER_VALUE, context, safeSlot), keyCode)
-                .putString(profileKey(TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
+                .putInt(inputProfileKey(KEY_CODE, context, safeSlot), keyCode)
+                .putInt(inputProfileKey(TRIGGER_TYPE, context, safeSlot), TRIGGER_KEY)
+                .putInt(inputProfileKey(TRIGGER_VALUE, context, safeSlot), keyCode)
+                .putString(inputProfileKey(TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
                 .apply();
     }
 
@@ -202,11 +211,12 @@ final class MappingStore {
     }
 
     static void saveLongKeyCode(Context context, int slot, int keyCode, String signature) {
+        ensureInputBindingsMigrated(context);
         int safeSlot = clampSlot(slot);
         prefs(context).edit()
-                .putInt(profileKey(LONG_TRIGGER_TYPE, context, safeSlot), TRIGGER_KEY)
-                .putInt(profileKey(LONG_TRIGGER_VALUE, context, safeSlot), keyCode)
-                .putString(profileKey(LONG_TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
+                .putInt(inputProfileKey(LONG_TRIGGER_TYPE, context, safeSlot), TRIGGER_KEY)
+                .putInt(inputProfileKey(LONG_TRIGGER_VALUE, context, safeSlot), keyCode)
+                .putString(inputProfileKey(LONG_TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
                 .apply();
     }
 
@@ -297,12 +307,13 @@ final class MappingStore {
     }
 
     static void saveMouseGesture(Context context, int slot, int direction, String signature) {
+        ensureInputBindingsMigrated(context);
         int safeSlot = clampSlot(slot);
         prefs(context).edit()
-                .putInt(profileKey(KEY_CODE, context, safeSlot), KeyEvent.KEYCODE_UNKNOWN)
-                .putInt(profileKey(TRIGGER_TYPE, context, safeSlot), TRIGGER_MOUSE_GESTURE)
-                .putInt(profileKey(TRIGGER_VALUE, context, safeSlot), direction)
-                .putString(profileKey(TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
+                .putInt(inputProfileKey(KEY_CODE, context, safeSlot), KeyEvent.KEYCODE_UNKNOWN)
+                .putInt(inputProfileKey(TRIGGER_TYPE, context, safeSlot), TRIGGER_MOUSE_GESTURE)
+                .putInt(inputProfileKey(TRIGGER_VALUE, context, safeSlot), direction)
+                .putString(inputProfileKey(TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
                 .apply();
     }
 
@@ -311,11 +322,12 @@ final class MappingStore {
     }
 
     static void saveLongMouseGesture(Context context, int slot, int direction, String signature) {
+        ensureInputBindingsMigrated(context);
         int safeSlot = clampSlot(slot);
         prefs(context).edit()
-                .putInt(profileKey(LONG_TRIGGER_TYPE, context, safeSlot), TRIGGER_MOUSE_GESTURE)
-                .putInt(profileKey(LONG_TRIGGER_VALUE, context, safeSlot), direction)
-                .putString(profileKey(LONG_TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
+                .putInt(inputProfileKey(LONG_TRIGGER_TYPE, context, safeSlot), TRIGGER_MOUSE_GESTURE)
+                .putInt(inputProfileKey(LONG_TRIGGER_VALUE, context, safeSlot), direction)
+                .putString(inputProfileKey(LONG_TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
                 .apply();
     }
 
@@ -359,24 +371,30 @@ final class MappingStore {
         if (isBlank(signature)) {
             return;
         }
+        ensureInputBindingsMigrated(context);
         int safeIndex = Math.max(0, index);
         SharedPreferences.Editor editor = prefs(context).edit()
-                .putString(LEARNED_REMOTE_BUTTON_SIGNATURE + safeIndex, signature)
-                .putInt(LEARNED_REMOTE_BUTTON_DIRECTION + safeIndex, direction);
+                .putString(devicePreferenceKey(LEARNED_REMOTE_BUTTON_SIGNATURE + safeIndex, context), signature)
+                .putInt(devicePreferenceKey(LEARNED_REMOTE_BUTTON_DIRECTION + safeIndex, context), direction);
         int count = Math.max(learnedRemoteButtonCount(context), safeIndex + 1);
-        editor.putInt(LEARNED_REMOTE_BUTTON_COUNT, count).apply();
+        editor.putInt(devicePreferenceKey(LEARNED_REMOTE_BUTTON_COUNT, context), count).apply();
     }
 
     static int learnedRemoteButtonCount(Context context) {
-        return Math.max(0, prefs(context).getInt(LEARNED_REMOTE_BUTTON_COUNT, 0));
+        ensureInputBindingsMigrated(context);
+        return Math.max(0, prefs(context).getInt(devicePreferenceKey(LEARNED_REMOTE_BUTTON_COUNT, context), 0));
     }
 
     static String learnedRemoteButtonSignature(Context context, int index) {
-        return prefs(context).getString(LEARNED_REMOTE_BUTTON_SIGNATURE + Math.max(0, index), "");
+        ensureInputBindingsMigrated(context);
+        return prefs(context).getString(
+                devicePreferenceKey(LEARNED_REMOTE_BUTTON_SIGNATURE + Math.max(0, index), context), "");
     }
 
     static int learnedRemoteButtonDirection(Context context, int index) {
-        return prefs(context).getInt(LEARNED_REMOTE_BUTTON_DIRECTION + Math.max(0, index), TRIGGER_UNKNOWN);
+        ensureInputBindingsMigrated(context);
+        return prefs(context).getInt(
+                devicePreferenceKey(LEARNED_REMOTE_BUTTON_DIRECTION + Math.max(0, index), context), TRIGGER_UNKNOWN);
     }
 
     static int findLearnedRemoteButton(Context context, String signature) {
@@ -397,6 +415,7 @@ final class MappingStore {
     }
 
     static void selectAllInputDevices(Context context) {
+        ensureInputBindingsMigrated(context);
         prefs(context).edit()
                 .remove(INPUT_DEVICE_DESCRIPTOR)
                 .remove(INPUT_DEVICE_NAME)
@@ -413,23 +432,28 @@ final class MappingStore {
     }
 
     static void saveInputDevice(Context context, String descriptor, String name, int vendorId, int productId) {
+        if (hasSelectedInputDevice(context)) {
+            ensureInputBindingsMigrated(context);
+            ensureControllerSettingsMigrated(context);
+        }
         prefs(context).edit()
                 .putString(INPUT_DEVICE_DESCRIPTOR, cleanName(descriptor, ""))
                 .putString(INPUT_DEVICE_NAME, cleanName(name, "Selected device"))
                 .putInt(INPUT_DEVICE_VENDOR_ID, Math.max(0, vendorId))
                 .putInt(INPUT_DEVICE_PRODUCT_ID, Math.max(0, productId))
-                .putInt(INPUT_DEVICE_MODE, DEVICE_MODE_UNKNOWN)
-                .putInt(TRAP_MODE, TRAP_MODE_FULL_SCREEN)
-                .remove(TRAP_ZONE_COUNT)
                 .apply();
+        ensureInputBindingsMigrated(context);
+        ensureControllerSettingsMigrated(context);
     }
 
     static void saveInputDeviceMode(Context context, int mode) {
-        prefs(context).edit().putInt(INPUT_DEVICE_MODE, mode).apply();
+        ensureControllerSettingsMigrated(context);
+        prefs(context).edit().putInt(devicePreferenceKey(INPUT_DEVICE_MODE, context), mode).apply();
     }
 
     static int inputDeviceMode(Context context) {
-        return prefs(context).getInt(INPUT_DEVICE_MODE, DEVICE_MODE_UNKNOWN);
+        ensureControllerSettingsMigrated(context);
+        return prefs(context).getInt(devicePreferenceKey(INPUT_DEVICE_MODE, context), DEVICE_MODE_UNKNOWN);
     }
 
     static String inputDeviceModeLabel(Context context) {
@@ -446,11 +470,13 @@ final class MappingStore {
     }
 
     static int trapMode(Context context) {
-        return prefs(context).getInt(TRAP_MODE, TRAP_MODE_FULL_SCREEN);
+        ensureControllerSettingsMigrated(context);
+        return prefs(context).getInt(devicePreferenceKey(TRAP_MODE, context), TRAP_MODE_AUTO);
     }
 
     static void saveTrapMode(Context context, int mode) {
-        prefs(context).edit().putInt(TRAP_MODE, mode).apply();
+        ensureControllerSettingsMigrated(context);
+        prefs(context).edit().putInt(devicePreferenceKey(TRAP_MODE, context), mode).apply();
     }
 
     static boolean isFullScreenTrapMode(Context context) {
@@ -479,12 +505,15 @@ final class MappingStore {
 
     static boolean acceptsInputDevice(Context context, String descriptor) {
         String selectedDescriptor = selectedInputDeviceDescriptor(context);
-        return selectedDescriptor.isEmpty() || selectedDescriptor.equals(descriptor);
+        return !selectedDescriptor.isEmpty() && selectedDescriptor.equals(descriptor);
     }
 
     static boolean acceptsInputDevice(Context context, String descriptor, String name, int vendorId, int productId) {
         String selectedDescriptor = selectedInputDeviceDescriptor(context);
-        if (selectedDescriptor.isEmpty() || selectedDescriptor.equals(cleanName(descriptor, ""))) {
+        if (selectedDescriptor.isEmpty()) {
+            return false;
+        }
+        if (selectedDescriptor.equals(cleanName(descriptor, ""))) {
             return true;
         }
 
@@ -504,71 +533,79 @@ final class MappingStore {
     }
 
     static void saveControllerAnalysis(Context context, String report, int keyEvents, int motionEvents) {
+        ensureControllerSettingsMigrated(context);
         prefs(context).edit()
-                .putString(CONTROLLER_ANALYSIS_REPORT, cleanName(report, ""))
-                .putLong(CONTROLLER_ANALYSIS_SAVED_AT, System.currentTimeMillis())
-                .putInt(CONTROLLER_ANALYSIS_KEY_EVENTS, Math.max(0, keyEvents))
-                .putInt(CONTROLLER_ANALYSIS_MOTION_EVENTS, Math.max(0, motionEvents))
+                .putString(devicePreferenceKey(CONTROLLER_ANALYSIS_REPORT, context), cleanName(report, ""))
+                .putLong(devicePreferenceKey(CONTROLLER_ANALYSIS_SAVED_AT, context), System.currentTimeMillis())
+                .putInt(devicePreferenceKey(CONTROLLER_ANALYSIS_KEY_EVENTS, context), Math.max(0, keyEvents))
+                .putInt(devicePreferenceKey(CONTROLLER_ANALYSIS_MOTION_EVENTS, context), Math.max(0, motionEvents))
                 .apply();
     }
 
     static String lastControllerAnalysisSummary(Context context) {
+        ensureControllerSettingsMigrated(context);
         SharedPreferences prefs = prefs(context);
-        long savedAt = prefs.getLong(CONTROLLER_ANALYSIS_SAVED_AT, 0L);
+        long savedAt = prefs.getLong(devicePreferenceKey(CONTROLLER_ANALYSIS_SAVED_AT, context), 0L);
         if (savedAt <= 0L) {
             return "No saved analyzer session.";
         }
 
         return "Last saved: " + savedAt
-                + "\nkey events " + prefs.getInt(CONTROLLER_ANALYSIS_KEY_EVENTS, 0)
-                + ", motion events " + prefs.getInt(CONTROLLER_ANALYSIS_MOTION_EVENTS, 0);
+                + "\nkey events " + prefs.getInt(devicePreferenceKey(CONTROLLER_ANALYSIS_KEY_EVENTS, context), 0)
+                + ", motion events "
+                + prefs.getInt(devicePreferenceKey(CONTROLLER_ANALYSIS_MOTION_EVENTS, context), 0);
     }
 
     static void clearTrapZones(Context context) {
-        SharedPreferences.Editor editor = prefs(context).edit().putInt(TRAP_ZONE_COUNT, 0);
+        ensureControllerSettingsMigrated(context);
+        SharedPreferences.Editor editor = prefs(context).edit()
+                .putInt(devicePreferenceKey(TRAP_ZONE_COUNT, context), 0);
         for (int index = 0; index < MAX_TRAP_ZONES; index++) {
-            editor.remove(TRAP_ZONE_X + index)
-                    .remove(TRAP_ZONE_Y + index)
-                    .remove(TRAP_ZONE_W + index)
-                    .remove(TRAP_ZONE_H + index);
+            editor.remove(devicePreferenceKey(TRAP_ZONE_X + index, context))
+                    .remove(devicePreferenceKey(TRAP_ZONE_Y + index, context))
+                    .remove(devicePreferenceKey(TRAP_ZONE_W + index, context))
+                    .remove(devicePreferenceKey(TRAP_ZONE_H + index, context));
         }
         editor.apply();
     }
 
     static void saveTrapZones(Context context, List<TrapZone> zones) {
+        ensureControllerSettingsMigrated(context);
         SharedPreferences.Editor editor = prefs(context).edit();
         int count = Math.min(MAX_TRAP_ZONES, zones == null ? 0 : zones.size());
-        editor.putInt(TRAP_ZONE_COUNT, count);
+        editor.putInt(devicePreferenceKey(TRAP_ZONE_COUNT, context), count);
         for (int index = 0; index < MAX_TRAP_ZONES; index++) {
             if (index < count) {
                 TrapZone zone = zones.get(index);
-                editor.putInt(TRAP_ZONE_X + index, zone.x)
-                        .putInt(TRAP_ZONE_Y + index, zone.y)
-                        .putInt(TRAP_ZONE_W + index, zone.width)
-                        .putInt(TRAP_ZONE_H + index, zone.height);
+                editor.putInt(devicePreferenceKey(TRAP_ZONE_X + index, context), zone.x)
+                        .putInt(devicePreferenceKey(TRAP_ZONE_Y + index, context), zone.y)
+                        .putInt(devicePreferenceKey(TRAP_ZONE_W + index, context), zone.width)
+                        .putInt(devicePreferenceKey(TRAP_ZONE_H + index, context), zone.height);
             } else {
-                editor.remove(TRAP_ZONE_X + index)
-                        .remove(TRAP_ZONE_Y + index)
-                        .remove(TRAP_ZONE_W + index)
-                        .remove(TRAP_ZONE_H + index);
+                editor.remove(devicePreferenceKey(TRAP_ZONE_X + index, context))
+                        .remove(devicePreferenceKey(TRAP_ZONE_Y + index, context))
+                        .remove(devicePreferenceKey(TRAP_ZONE_W + index, context))
+                        .remove(devicePreferenceKey(TRAP_ZONE_H + index, context));
             }
         }
         editor.apply();
     }
 
     static List<TrapZone> trapZones(Context context) {
+        ensureControllerSettingsMigrated(context);
         SharedPreferences prefs = prefs(context);
-        int count = Math.max(0, Math.min(MAX_TRAP_ZONES, prefs.getInt(TRAP_ZONE_COUNT, 0)));
+        int count = Math.max(0, Math.min(MAX_TRAP_ZONES,
+                prefs.getInt(devicePreferenceKey(TRAP_ZONE_COUNT, context), 0)));
         List<TrapZone> zones = new ArrayList<>();
         for (int index = 0; index < count; index++) {
-            int width = prefs.getInt(TRAP_ZONE_W + index, 0);
-            int height = prefs.getInt(TRAP_ZONE_H + index, 0);
+            int width = prefs.getInt(devicePreferenceKey(TRAP_ZONE_W + index, context), 0);
+            int height = prefs.getInt(devicePreferenceKey(TRAP_ZONE_H + index, context), 0);
             if (width <= 0 || height <= 0) {
                 continue;
             }
             zones.add(new TrapZone(
-                    prefs.getInt(TRAP_ZONE_X + index, 0),
-                    prefs.getInt(TRAP_ZONE_Y + index, 0),
+                    prefs.getInt(devicePreferenceKey(TRAP_ZONE_X + index, context), 0),
+                    prefs.getInt(devicePreferenceKey(TRAP_ZONE_Y + index, context), 0),
                     width,
                     height
             ));
@@ -585,7 +622,162 @@ final class MappingStore {
     }
 
     private static String profileKey(String prefix, Context context, int slot) {
-        return "p" + currentProfile(context) + "_" + prefix + slot;
+        return devicePreferenceKey("p" + currentProfile(context) + "_" + prefix + slot, context);
+    }
+
+    private static String inputProfileKey(String prefix, Context context, int slot) {
+        return profileKey(prefix, context, slot);
+    }
+
+    private static String devicePreferenceKey(String key, Context context) {
+        return "d" + Integer.toHexString(deviceIdentity(context).hashCode()) + "_" + key;
+    }
+
+    private static String deviceIdentity(Context context) {
+        SharedPreferences prefs = prefs(context);
+        String descriptor = prefs.getString(INPUT_DEVICE_DESCRIPTOR, "");
+        if (!isBlank(descriptor)) {
+            return "descriptor:" + descriptor.trim();
+        }
+
+        int vendorId = prefs.getInt(INPUT_DEVICE_VENDOR_ID, 0);
+        int productId = prefs.getInt(INPUT_DEVICE_PRODUCT_ID, 0);
+        String name = prefs.getString(INPUT_DEVICE_NAME, "");
+        if (vendorId > 0 || productId > 0 || !isBlank(name)) {
+            return "hardware:" + vendorId + ":" + productId + ":" + cleanName(name, "unknown");
+        }
+        return "all-devices";
+    }
+
+    private static void ensureInputBindingsMigrated(Context context) {
+        SharedPreferences prefs = prefs(context);
+        if (prefs.getBoolean(INPUT_BINDINGS_MIGRATED, false)) {
+            return;
+        }
+
+        SharedPreferences.Editor editor = prefs.edit();
+        String[] intPrefixes = {
+                KEY_CODE, TRIGGER_TYPE, TRIGGER_VALUE, LONG_TRIGGER_TYPE, LONG_TRIGGER_VALUE
+        };
+        String[] stringPrefixes = {TRIGGER_SIGNATURE, LONG_TRIGGER_SIGNATURE};
+        for (int profile = 0; profile < PROFILE_COUNT; profile++) {
+            for (int slot = 0; slot < SLOT_COUNT; slot++) {
+                for (String prefix : intPrefixes) {
+                    String legacyKey = "p" + profile + "_" + prefix + slot;
+                    if (prefs.contains(legacyKey)) {
+                        editor.putInt(devicePreferenceKey(legacyKey, context),
+                                prefs.getInt(legacyKey, TRIGGER_UNKNOWN));
+                    }
+                }
+                for (String prefix : stringPrefixes) {
+                    String legacyKey = "p" + profile + "_" + prefix + slot;
+                    if (prefs.contains(legacyKey)) {
+                        editor.putString(devicePreferenceKey(legacyKey, context),
+                                prefs.getString(legacyKey, ""));
+                    }
+                }
+            }
+        }
+
+        int learnedCount = Math.max(0, prefs.getInt(LEARNED_REMOTE_BUTTON_COUNT, 0));
+        if (learnedCount > 0) {
+            editor.putInt(devicePreferenceKey(LEARNED_REMOTE_BUTTON_COUNT, context), learnedCount);
+            for (int index = 0; index < learnedCount; index++) {
+                editor.putString(devicePreferenceKey(LEARNED_REMOTE_BUTTON_SIGNATURE + index, context),
+                        prefs.getString(LEARNED_REMOTE_BUTTON_SIGNATURE + index, ""));
+                editor.putInt(devicePreferenceKey(LEARNED_REMOTE_BUTTON_DIRECTION + index, context),
+                        prefs.getInt(LEARNED_REMOTE_BUTTON_DIRECTION + index, TRIGGER_UNKNOWN));
+            }
+        }
+        editor.putBoolean(INPUT_BINDINGS_MIGRATED, true).apply();
+    }
+
+    private static void ensureControllerSettingsMigrated(Context context) {
+        SharedPreferences prefs = prefs(context);
+        if (prefs.getBoolean(CONTROLLER_SETTINGS_MIGRATED, false)
+                || isBlank(prefs.getString(INPUT_DEVICE_DESCRIPTOR, ""))) {
+            return;
+        }
+
+        SharedPreferences.Editor editor = prefs.edit();
+        int currentProfile = clampProfile(prefs.getInt(CURRENT_PROFILE, 0));
+        editor.putInt(devicePreferenceKey(CURRENT_PROFILE, context), currentProfile);
+
+        for (int profile = 0; profile < PROFILE_COUNT; profile++) {
+            copyStringPreference(prefs, editor, PROFILE_NAME + profile,
+                    devicePreferenceKey(PROFILE_NAME + profile, context));
+            for (int slot = 0; slot < SLOT_COUNT; slot++) {
+                String profilePrefix = "p" + profile + "_";
+                copyStringPreference(prefs, editor, profilePrefix + BUTTON_NAME + slot,
+                        devicePreferenceKey(profilePrefix + BUTTON_NAME + slot, context));
+                copyLegacyPointPreference(prefs, editor, profilePrefix + X + slot,
+                        legacyTriggerKey(X, slot), X + slot,
+                        devicePreferenceKey(profilePrefix + X + slot, context));
+                copyLegacyPointPreference(prefs, editor, profilePrefix + Y + slot,
+                        legacyTriggerKey(Y, slot), Y + slot,
+                        devicePreferenceKey(profilePrefix + Y + slot, context));
+            }
+        }
+
+        copyIntPreference(prefs, editor, INPUT_DEVICE_MODE, devicePreferenceKey(INPUT_DEVICE_MODE, context));
+        copyIntPreference(prefs, editor, TRAP_MODE, devicePreferenceKey(TRAP_MODE, context));
+        copyIntPreference(prefs, editor, TRAP_ZONE_COUNT, devicePreferenceKey(TRAP_ZONE_COUNT, context));
+        for (int index = 0; index < MAX_TRAP_ZONES; index++) {
+            copyIntPreference(prefs, editor, TRAP_ZONE_X + index,
+                    devicePreferenceKey(TRAP_ZONE_X + index, context));
+            copyIntPreference(prefs, editor, TRAP_ZONE_Y + index,
+                    devicePreferenceKey(TRAP_ZONE_Y + index, context));
+            copyIntPreference(prefs, editor, TRAP_ZONE_W + index,
+                    devicePreferenceKey(TRAP_ZONE_W + index, context));
+            copyIntPreference(prefs, editor, TRAP_ZONE_H + index,
+                    devicePreferenceKey(TRAP_ZONE_H + index, context));
+        }
+
+        copyStringPreference(prefs, editor, CONTROLLER_ANALYSIS_REPORT,
+                devicePreferenceKey(CONTROLLER_ANALYSIS_REPORT, context));
+        copyLongPreference(prefs, editor, CONTROLLER_ANALYSIS_SAVED_AT,
+                devicePreferenceKey(CONTROLLER_ANALYSIS_SAVED_AT, context));
+        copyIntPreference(prefs, editor, CONTROLLER_ANALYSIS_KEY_EVENTS,
+                devicePreferenceKey(CONTROLLER_ANALYSIS_KEY_EVENTS, context));
+        copyIntPreference(prefs, editor, CONTROLLER_ANALYSIS_MOTION_EVENTS,
+                devicePreferenceKey(CONTROLLER_ANALYSIS_MOTION_EVENTS, context));
+
+        editor.putBoolean(CONTROLLER_SETTINGS_MIGRATED, true).apply();
+    }
+
+    private static void copyStringPreference(SharedPreferences prefs, SharedPreferences.Editor editor,
+            String source, String target) {
+        if (prefs.contains(source) && !prefs.contains(target)) {
+            editor.putString(target, prefs.getString(source, ""));
+        }
+    }
+
+    private static void copyIntPreference(SharedPreferences prefs, SharedPreferences.Editor editor,
+            String source, String target) {
+        if (prefs.contains(source) && !prefs.contains(target)) {
+            editor.putInt(target, prefs.getInt(source, 0));
+        }
+    }
+
+    private static void copyLongPreference(SharedPreferences prefs, SharedPreferences.Editor editor,
+            String source, String target) {
+        if (prefs.contains(source) && !prefs.contains(target)) {
+            editor.putLong(target, prefs.getLong(source, 0L));
+        }
+    }
+
+    private static void copyLegacyPointPreference(SharedPreferences prefs, SharedPreferences.Editor editor,
+            String profileSource, String legacySource, String oldestSource, String target) {
+        if (prefs.contains(target)) {
+            return;
+        }
+        if (prefs.contains(profileSource)) {
+            editor.putFloat(target, prefs.getFloat(profileSource, -1f));
+        } else if (prefs.contains(legacySource)) {
+            editor.putFloat(target, prefs.getFloat(legacySource, -1f));
+        } else if (prefs.contains(oldestSource)) {
+            editor.putFloat(target, prefs.getFloat(oldestSource, -1f));
+        }
     }
 
     private static String legacyTriggerKey(String prefix, int slot) {
