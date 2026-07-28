@@ -1,9 +1,13 @@
 <resources>
     <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
+        <!--
+            statusBarColor / navigationBarColor는 targetSdk 35부터 무시된다.
+            화면이 시스템 바 아래까지 그려지고 앱 배경이 그대로 비친다.
+            여백은 MainActivity.applySystemBarInsets()가 잡는다.
+        -->
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:statusBarColor">#F7F7F2</item>
-        <item name="android:navigationBarColor">#F7F7F2</item>
+        <item name="android:windowLightNavigationBar">true</item>
         <item name="android:colorAccent">#2D6CDF</item>
     </style>
 </resources>

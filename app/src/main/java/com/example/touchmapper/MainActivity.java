@@ -3,6 +3,7 @@ package com.example.touchmapper;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -12,6 +13,8 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.MotionEvent;
+import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -102,6 +105,7 @@ public class MainActivity extends Activity {
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
         scrollView.setBackgroundColor(COLOR_PAGE);
+        applySystemBarInsets(scrollView);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -252,6 +256,30 @@ public class MainActivity extends Activity {
         root.addView(mappingsContainer);
 
         setContentView(scrollView);
+    }
+
+    /**
+     * 상태 표시줄과 내비게이션 바 높이만큼 안쪽으로 밀어준다.
+     *
+     * targetSdk 35부터 화면이 시스템 바 아래까지 그려지고, 36부터는 이를 끄는 방법이 없다.
+     * 테마의 statusBarColor / navigationBarColor는 무시된다. 직접 여백을 잡지 않으면
+     * 제목이 시계에 겹치고 맨 아래 항목이 내비게이션 바에 가린다.
+     */
+    private void applySystemBarInsets(View view) {
+        view.setOnApplyWindowInsetsListener((target, insets) -> {
+            int top;
+            int bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                top = bars.top;
+                bottom = bars.bottom;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            target.setPadding(target.getPaddingLeft(), top, target.getPaddingRight(), bottom);
+            return insets;
+        });
     }
 
     private void confirmReset() {
