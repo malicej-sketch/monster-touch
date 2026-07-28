@@ -42,6 +42,8 @@ public class MainActivity extends Activity {
     private Button inputDeviceButton;
     private TextView inputDeviceInfoText;
     private Button showPositionsButton;
+    private TextView batteryText;
+    private Button batteryOverlayButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -199,6 +201,24 @@ public class MainActivity extends Activity {
         Button setupPanelButton = makeButton("위치 설정", 0xFFEAF2FF, COLOR_PRIMARY);
         setupPanelButton.setOnClickListener(view -> startPositionSetup());
         setupActions.addView(setupPanelButton, utilityButtonParams());
+
+        batteryText = new TextView(this);
+        batteryText.setTextSize(15f);
+        batteryText.setTextColor(COLOR_TEXT);
+        batteryText.setPadding(dp(14), dp(12), dp(14), dp(12));
+        batteryText.setBackground(rounded(COLOR_SURFACE, dp(8)));
+        LinearLayout.LayoutParams batteryParams = matchWidthParams();
+        root.addView(batteryText, batteryParams);
+
+        batteryOverlayButton = makeButton("", 0xFFF1F5F9, COLOR_TEXT);
+        batteryOverlayButton.setOnClickListener(view -> {
+            if (!TouchAccessibilityService.toggleBatteryOverlay()) {
+                Toast.makeText(this, "먼저 접근성 서비스를 켜주세요.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            renderMappings();
+        });
+        root.addView(batteryOverlayButton, matchWidthParams());
 
         showPositionsButton = makeButton(
                 positionButtonLabel(),
@@ -367,6 +387,15 @@ public class MainActivity extends Activity {
         }
         if (showPositionsButton != null) {
             showPositionsButton.setText(positionButtonLabel());
+        }
+        if (batteryText != null) {
+            BatteryReading reading = BatteryReading.read(this);
+            batteryText.setText("충전 " + reading.currentText() + " · 배터리 " + reading.temperatureText());
+            batteryText.setTextColor(reading.isHot() ? 0xFFB42318 : COLOR_TEXT);
+        }
+        if (batteryOverlayButton != null) {
+            batteryOverlayButton.setText(TouchAccessibilityService.isBatteryOverlayVisible()
+                    ? "배터리 표시 켜짐" : "배터리 표시 꺼짐");
         }
         String lockText = TouchAccessibilityService.isTouchLocked() ? "터치 잠금 ON" : "터치 잠금 OFF";
         String positionText = TouchAccessibilityService.arePositionsVisible() ? "위치 표시 ON" : "위치 표시 OFF";

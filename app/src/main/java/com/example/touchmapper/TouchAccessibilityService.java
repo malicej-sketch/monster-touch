@@ -54,6 +54,7 @@ public class TouchAccessibilityService extends AccessibilityService {
     private static final long VOLUME_KEY_BURST_GAP_MS = 1000L;
     private static final long HOLD_PHASE_MS = 5000L;
     private static final long ACTION_HOLD_MS = 1500L;
+    private static final long BATTERY_REFRESH_MS = 3000L;
     private static final long POST_CAPTURE_COOLDOWN_MS = 900L;
     private static final long INPUT_CAPTURE_KEY_GRACE_MS = 750L;
     private static final int POSITION_TOGGLE_SLOT = MappingStore.MARKER_TOGGLE_SLOT;
@@ -166,6 +167,19 @@ public class TouchAccessibilityService extends AccessibilityService {
     private boolean inputCaptureHoldSawRelease;
     private final Runnable finishHoldPhaseRunnable = this::finishHoldPhase;
     private View noSavedPointOverlay;
+    private View batteryOverlay;
+    private TextView batteryOverlayText;
+    private static boolean batteryVisible;
+    private final Runnable batteryTickRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (batteryOverlayText == null) {
+                return;
+            }
+            updateBatteryOverlayText();
+            mainHandler.postDelayed(this, BATTERY_REFRESH_MS);
+        }
+    };
     private long inputCaptureCooldownUntilMs;
     private int heldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
     private int heldSlot = -1;
@@ -358,6 +372,24 @@ public class TouchAccessibilityService extends AccessibilityService {
         return true;
     }
 
+    static boolean toggleBatteryOverlay() {
+        TouchAccessibilityService service = instance;
+        if (service == null) {
+            return false;
+        }
+        batteryVisible = !batteryVisible;
+        if (batteryVisible) {
+            service.showBatteryOverlay();
+        } else {
+            service.hideBatteryOverlay();
+        }
+        return true;
+    }
+
+    static boolean isBatteryOverlayVisible() {
+        return batteryVisible;
+    }
+
     static boolean arePositionsVisible() {
         TouchAccessibilityService service = instance;
         return service != null && service.positionsVisible;
@@ -419,8 +451,14 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (active) {
             service.hidePositionOverlay();
             service.hideNoSavedPointPanel();
-        } else if (service.positionsVisible) {
-            service.showPositionOverlay();
+            service.hideBatteryOverlay();
+        } else {
+            if (service.positionsVisible) {
+                service.showPositionOverlay();
+            }
+            if (batteryVisible) {
+                service.showBatteryOverlay();
+            }
         }
         service.refreshRemoteTrapOverlay();
     }
@@ -674,6 +712,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         hideControllerDiagnosticPanel();
         hideAdbProbePanel();
         hideNoSavedPointPanel();
+        hideBatteryOverlay();
         hidePositionOverlay();
         hideTouchLockOverlay();
         hideRemoteTrapOverlay();
@@ -752,6 +791,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         hideControllerDiagnosticPanel();
         hideAdbProbePanel();
         hideNoSavedPointPanel();
+        hideBatteryOverlay();
         hidePositionOverlay();
         hideTouchLockOverlay();
         hideRemoteTrapOverlay();
@@ -2799,6 +2839,66 @@ public class TouchAccessibilityService extends AccessibilityService {
         noSavedPointOverlay = panel;
         windowManager.addView(noSavedPointOverlay, params);
         refreshRemoteTrapOverlay();
+    }
+
+    /**
+     * 충전 전류와 배터리 온도를 화면 위에 띄운다.
+     *
+     * 주행 중에는 배달 앱을 보고 있어서 설정 화면으로는 확인할 수 없다. 터치를 받지
+     * 않으므로 아래 앱 조작을 방해하지 않는다.
+     */
+    private void showBatteryOverlay() {
+        hideBatteryOverlay();
+        if (windowManager == null) {
+            return;
+        }
+
+        TextView text = new TextView(this);
+        text.setTextSize(13f);
+        text.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        text.setPadding(dp(10), dp(6), dp(10), dp(6));
+        text.setBackground(rounded(0xCC000000, dp(6)));
+        text.setTextColor(0xFFFFFFFF);
+
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+        );
+        params.gravity = Gravity.TOP | Gravity.END;
+        params.x = dp(10);
+        params.y = dp(10);
+
+        batteryOverlayText = text;
+        batteryOverlay = text;
+        windowManager.addView(batteryOverlay, params);
+        updateBatteryOverlayText();
+        mainHandler.removeCallbacks(batteryTickRunnable);
+        mainHandler.postDelayed(batteryTickRunnable, BATTERY_REFRESH_MS);
+    }
+
+    private void updateBatteryOverlayText() {
+        if (batteryOverlayText == null) {
+            return;
+        }
+        BatteryReading reading = BatteryReading.read(this);
+        batteryOverlayText.setText(reading.currentText() + "   " + reading.temperatureText());
+        batteryOverlayText.setTextColor(reading.isHot() ? 0xFFFF6B6B : 0xFFFFFFFF);
+    }
+
+    private void hideBatteryOverlay() {
+        mainHandler.removeCallbacks(batteryTickRunnable);
+        batteryOverlayText = null;
+        if (batteryOverlay == null || windowManager == null) {
+            batteryOverlay = null;
+            return;
+        }
+        windowManager.removeView(batteryOverlay);
+        batteryOverlay = null;
     }
 
     private void hideNoSavedPointPanel() {
