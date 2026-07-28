@@ -435,12 +435,29 @@ public class MainActivity extends Activity {
         cell.setBackground(roundedStroke(COLOR_SURFACE, dp(8), COLOR_BORDER, 1));
         cell.setElevation(dp(1));
 
+        boolean holdToRun = MappingStore.longTriggerIsHold(this, slot)
+                || MappingStore.longTriggerSharesKeyWithTap(this, slot);
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView title = new TextView(this);
         title.setText(label);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextSize(17f);
         title.setTextColor(COLOR_TEXT);
-        cell.addView(title);
+        titleRow.addView(title);
+
+        if (holdToRun) {
+            TextView hint = new TextView(this);
+            hint.setTextSize(12f);
+            hint.setTextColor(COLOR_MUTED);
+            hint.setPadding(dp(6), 0, 0, 0);
+            hint.setText("1.5초 길게 누르기");
+            titleRow.addView(hint);
+        }
+        cell.addView(titleRow);
 
         TextView detail = new TextView(this);
         detail.setTextSize(14f);

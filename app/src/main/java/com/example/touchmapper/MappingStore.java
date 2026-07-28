@@ -37,6 +37,7 @@ final class MappingStore {
     private static final String TRIGGER_VALUE = "trigger_value_";
     private static final String TRIGGER_SIGNATURE = "trigger_signature_";
     private static final String LONG_TRIGGER_REPEAT_GAP = "long_trigger_repeat_gap_";
+    private static final String LONG_TRIGGER_HOLD = "long_trigger_hold_";
     private static final String ANCHOR_MIN_X = "anchor_min_x_";
     private static final String ANCHOR_MIN_Y = "anchor_min_y_";
     private static final String ANCHOR_MAX_X = "anchor_max_x_";
@@ -437,6 +438,35 @@ final class MappingStore {
                 .putLong(inputProfileKey(LONG_TRIGGER_REPEAT_GAP, context, clampSlot(slot)),
                         Math.max(0L, gapMs))
                 .apply();
+    }
+
+    /**
+     * 이 동작이 "누르고 있기"로 발동하는지.
+     *
+     * HID 키보드처럼 누르는 동안 키가 계속 눌린 상태로 유지되는 컨트롤러는 짧게 눌렀을 때와
+     * 길게 눌렀을 때를 시간으로 가를 수 있다. 반대로 한 번 누름을 여러 신호로 쪼개 보내는
+     * 컨트롤러는 그럴 수 없어서 신호가 오는 즉시 발동한다.
+     */
+    static void saveLongTriggerHold(Context context, int slot, boolean hold) {
+        ensureInputBindingsMigrated(context);
+        prefs(context).edit()
+                .putBoolean(inputProfileKey(LONG_TRIGGER_HOLD, context, clampSlot(slot)), hold)
+                .apply();
+    }
+
+    /** 이 키가 다른 슬롯의 탭에도 걸려 있으면 짧게/길게로 갈리므로 실질적으로 홀드형이다. */
+    static boolean longTriggerSharesKeyWithTap(Context context, int slot) {
+        Mapping action = get(context, slot);
+        if (action.longTriggerType != TRIGGER_KEY || action.longTriggerValue == TRIGGER_UNKNOWN) {
+            return false;
+        }
+        return findByKeyCode(context, action.longTriggerValue) != null;
+    }
+
+    static boolean longTriggerIsHold(Context context, int slot) {
+        ensureInputBindingsMigrated(context);
+        return prefs(context).getBoolean(
+                inputProfileKey(LONG_TRIGGER_HOLD, context, clampSlot(slot)), false);
     }
 
     static long longTriggerRepeatGap(Context context, int slot) {

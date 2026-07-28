@@ -50,6 +50,7 @@ public class TouchAccessibilityService extends AccessibilityService {
     // 700ms로는 42ms 차이로 놓쳐서 토글이 두 번 뒤집혔다.
     private static final long VOLUME_KEY_BURST_GAP_MS = 1000L;
     private static final long HOLD_PHASE_MS = 5000L;
+    private static final long ACTION_HOLD_MS = 1500L;
     private static final long POST_CAPTURE_COOLDOWN_MS = 900L;
     private static final long INPUT_CAPTURE_KEY_GRACE_MS = 750L;
     private static final int POSITION_TOGGLE_SLOT = MappingStore.MARKER_TOGGLE_SLOT;
@@ -157,6 +158,9 @@ public class TouchAccessibilityService extends AccessibilityService {
     private int inputCaptureHoldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
     private long inputCaptureHoldLastMs;
     private long inputCaptureHoldMaxGapMs;
+    private boolean inputCaptureHoldKeyHeld;
+    private boolean inputCaptureHoldSawDown;
+    private boolean inputCaptureHoldSawRelease;
     private final Runnable finishHoldPhaseRunnable = this::finishHoldPhase;
     private View noSavedPointOverlay;
     private long inputCaptureCooldownUntilMs;
@@ -524,9 +528,13 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
 
         if (mapping == null) {
-            // 이 키는 동작 전용으로 등록된 별개 신호다. 누르는 즉시 실행한다.
             if (longMapping != null) {
-                if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                if (MappingStore.longTriggerIsHold(this, longMapping.slot)) {
+                    // 누르고 있어야 발동하는 컨트롤러다.
+                    handleHoldAction(event, longMapping.slot);
+                } else if (event.getAction() == KeyEvent.ACTION_DOWN
+                        && event.getRepeatCount() == 0) {
+                    // 신호를 쪼개 보내는 컨트롤러다. 길게 누름을 알 수 없으니 즉시 실행한다.
                     executeLongSlot(longMapping.slot);
                 }
                 return true;
@@ -711,7 +719,9 @@ public class TouchAccessibilityService extends AccessibilityService {
                 heldLongSlot = holdActionSlot(slot, longMapping);
                 longClickTriggered = false;
                 if (heldLongSlot >= 0) {
-                    mainHandler.postDelayed(lockLongClickRunnable, LOCK_LONG_CLICK_MS);
+                    // 등록된 동작은 1.5초, 버튼 1/4의 기존 암묵 동작은 종전대로 2초.
+                    long holdMs = longMapping != null ? ACTION_HOLD_MS : LOCK_LONG_CLICK_MS;
+                    mainHandler.postDelayed(lockLongClickRunnable, holdMs);
                 }
             }
             return true;
@@ -741,6 +751,26 @@ public class TouchAccessibilityService extends AccessibilityService {
      * 기존 암묵 동작(위치 표시 / 화면 잠금)을 유지한다. 키만 내보내는 HID 컨트롤러는
      * 남는 신호가 없어 이 암묵 경로에 의존한다.
      */
+    /** 누르고 있는 동안 시간을 재서 발동시킨다. 1.5초 전에 떼면 아무 일도 없다. */
+    private void handleHoldAction(KeyEvent event, int slot) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (event.getRepeatCount() == 0) {
+                heldKeyCode = event.getKeyCode();
+                heldLongSlot = slot;
+                longClickTriggered = false;
+                mainHandler.removeCallbacks(lockLongClickRunnable);
+                mainHandler.postDelayed(lockLongClickRunnable, ACTION_HOLD_MS);
+            }
+            return;
+        }
+        if (event.getAction() == KeyEvent.ACTION_UP && heldKeyCode == event.getKeyCode()) {
+            mainHandler.removeCallbacks(lockLongClickRunnable);
+            heldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+            heldLongSlot = -1;
+            longClickTriggered = false;
+        }
+    }
+
     private int holdActionSlot(int slot, MappingStore.Mapping longMapping) {
         if (longMapping != null) {
             return longMapping.slot;
@@ -784,10 +814,22 @@ public class TouchAccessibilityService extends AccessibilityService {
         int keyCode = inputCaptureHoldKeyCode;
         // 관측한 최대 간격에 여유를 둔다. 반복이 아예 없으면 0으로 두고 기본값을 쓴다.
         long gap = inputCaptureHoldMaxGapMs > 0L ? inputCaptureHoldMaxGapMs + 300L : 0L;
+        // 5초 내내 키가 눌린 채였으면 "누르고 있기"로 발동하는 컨트롤러다.
+        //
+        // 모든 키보드가 눌린 동안 반복 이벤트를 보내지는 않는다. 8BitDo처럼 조용한 기기도
+        // 있어서 repeatCount만 보면 놓친다. 5초 동안 한 번도 떼지 않았다는 사실이 더 확실한
+        // 신호다.
+        boolean hold = inputCaptureHoldKeyHeld
+                || (inputCaptureHoldSawDown && !inputCaptureHoldSawRelease);
         inputCaptureHoldPhase = false;
         inputCaptureHoldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
         finishInputCaptureWithKey(keyCode);
-        MappingStore.saveLongTriggerRepeatGap(this, slot, gap);
+        MappingStore.saveLongTriggerRepeatGap(this, slot, hold ? 0L : gap);
+        MappingStore.saveLongTriggerHold(this, slot, hold);
+        if (hold) {
+            Toast.makeText(this, "롱클릭으로 인식했습니다. 1.5초간 누르면 발동합니다.",
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     private boolean handleInputCaptureKeyEvent(KeyEvent event) {
@@ -796,9 +838,19 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
 
         if (inputCaptureHoldPhase) {
-            if (event.getAction() == KeyEvent.ACTION_DOWN
-                    && event.getKeyCode() == inputCaptureHoldKeyCode) {
-                recordHoldPhaseSignal(event.getEventTime());
+            if (event.getKeyCode() == inputCaptureHoldKeyCode) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                    inputCaptureHoldSawDown = true;
+                    if (event.getRepeatCount() > 0) {
+                        // 키가 물리적으로 눌린 채 유지되고 있다.
+                        inputCaptureHoldKeyHeld = true;
+                        updateInputCaptureStatus();
+                    } else {
+                        recordHoldPhaseSignal(event.getEventTime());
+                    }
+                } else if (event.getAction() == KeyEvent.ACTION_UP) {
+                    inputCaptureHoldSawRelease = true;
+                }
             }
             return true;
         }
@@ -1003,9 +1055,15 @@ public class TouchAccessibilityService extends AccessibilityService {
             return;
         }
         if (inputCaptureHoldPhase) {
-            inputCaptureStatus.setText("같은 버튼을 5초간 계속 누르고 계세요.\n"
-                    + "신호 " + (inputCaptureHoldLastMs > 0L ? "감지됨" : "대기 중")
-                    + (inputCaptureHoldMaxGapMs > 0L ? "  간격 " + inputCaptureHoldMaxGapMs + "ms" : ""));
+            String detail;
+            if (inputCaptureHoldKeyHeld) {
+                detail = "롱클릭으로 인식 · 1.5초간 누르면 발동";
+            } else if (inputCaptureHoldMaxGapMs > 0L) {
+                detail = "신호 반복 감지 · 간격 " + inputCaptureHoldMaxGapMs + "ms";
+            } else {
+                detail = "신호 대기 중";
+            }
+            inputCaptureStatus.setText("같은 버튼을 5초간 계속 누르고 계세요.\n" + detail);
             return;
         }
         int unique = inputCaptureSampleSignatures.isEmpty() && inputCaptureSampleKeyCode != KeyEvent.KEYCODE_UNKNOWN
@@ -2816,6 +2874,8 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureHoldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
         inputCaptureHoldLastMs = 0L;
         inputCaptureHoldMaxGapMs = 0L;
+        inputCaptureHoldKeyHeld = false;
+        inputCaptureHoldSawRelease = false;
         mainHandler.removeCallbacks(finishHoldPhaseRunnable);
         inputCaptureStatus = null;
         updateMotionCapture();
@@ -3315,6 +3375,8 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureHoldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
         inputCaptureHoldLastMs = 0L;
         inputCaptureHoldMaxGapMs = 0L;
+        inputCaptureHoldKeyHeld = false;
+        inputCaptureHoldSawRelease = false;
         mainHandler.removeCallbacks(finishHoldPhaseRunnable);
         inputCaptureStatus = null;
         updateMotionCapture();
