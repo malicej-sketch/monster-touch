@@ -11,6 +11,7 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -43,6 +44,34 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildUi();
+    }
+
+    /**
+     * 선택된 컨트롤러가 주입하는 터치는 이 화면에서 무시한다.
+     *
+     * 터치스크린형 컨트롤러는 화면에 실제 터치를 넣는다. 설정 화면에서 트랩을 내려두면
+     * 그 주입이 그대로 들어와 화면이 저절로 스크롤된다. 트랩으로 막으면 이번엔 트랩이
+     * 이 화면의 버튼을 가린다. 창을 덮는 대신 이 화면이 직접 걸러내면 둘 다 피할 수 있다.
+     * 손가락 터치는 기기가 다르므로 그대로 통과한다.
+     */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (isFromSelectedController(event)) {
+            return true;
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
+    private boolean isFromSelectedController(MotionEvent event) {
+        if (!MappingStore.hasSelectedInputDevice(this)) {
+            return false;
+        }
+        InputDevice device = event.getDevice();
+        if (device == null) {
+            return false;
+        }
+        return MappingStore.acceptsInputDevice(this, device.getDescriptor(), device.getName(),
+                device.getVendorId(), device.getProductId());
     }
 
     @Override

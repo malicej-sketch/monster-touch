@@ -46,7 +46,10 @@ public class TouchAccessibilityService extends AccessibilityService {
     private static final int MAX_VIBRATION_AMPLITUDE = 255;
     private static final long REMOTE_GESTURE_COOLDOWN_MS = 220L;
     private static final long REMOTE_VOLUME_SUPPRESS_MS = 400L;
-    private static final long VOLUME_KEY_BURST_GAP_MS = 700L;
+    // LP-910과 JX-05 모두 한 번 누름에 약 740ms 간격으로 신호를 두 번 이상 보낸다.
+    // 700ms로는 42ms 차이로 놓쳐서 토글이 두 번 뒤집혔다.
+    private static final long VOLUME_KEY_BURST_GAP_MS = 1000L;
+    private static final long HOLD_PHASE_MS = 5000L;
     private static final long POST_CAPTURE_COOLDOWN_MS = 900L;
     private static final long INPUT_CAPTURE_KEY_GRACE_MS = 750L;
     private static final int POSITION_TOGGLE_SLOT = MappingStore.MARKER_TOGGLE_SLOT;
@@ -149,6 +152,12 @@ public class TouchAccessibilityService extends AccessibilityService {
     private long lastAcceptedVolumeKeyMs;
     /** 학습 중 관측한 실제 DOWN 좌표. 트랩 존을 여기서 직접 만든다. */
     private final List<float[]> inputCaptureAnchors = new ArrayList<>();
+    /** 동작 키 학습 2단계: 5초간 누르고 있는 동안 신호가 오는 시각. */
+    private boolean inputCaptureHoldPhase;
+    private int inputCaptureHoldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+    private long inputCaptureHoldLastMs;
+    private long inputCaptureHoldMaxGapMs;
+    private final Runnable finishHoldPhaseRunnable = this::finishHoldPhase;
     private View noSavedPointOverlay;
     private long inputCaptureCooldownUntilMs;
     private int heldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
@@ -742,9 +751,56 @@ public class TouchAccessibilityService extends AccessibilityService {
         return -1;
     }
 
+    /**
+     * 동작 키 학습 2단계. 같은 키를 5초간 누르고 있는 동안 신호가 다시 오는 간격을 잰다.
+     *
+     * 컨트롤러마다 한 번 누름을 몇 개의 신호로 쪼개 보내는지가 다르다. 상수로 박아두면
+     * 기기가 바뀔 때마다 어긋나므로, 관측해서 그 기기의 값으로 저장한다.
+     */
+    private void startHoldPhase(int keyCode) {
+        inputCaptureHoldPhase = true;
+        inputCaptureHoldKeyCode = keyCode;
+        inputCaptureHoldLastMs = 0L;
+        inputCaptureHoldMaxGapMs = 0L;
+        updateInputCaptureStatus();
+        mainHandler.removeCallbacks(finishHoldPhaseRunnable);
+        mainHandler.postDelayed(finishHoldPhaseRunnable, HOLD_PHASE_MS);
+    }
+
+    private void recordHoldPhaseSignal(long eventTime) {
+        if (inputCaptureHoldLastMs > 0L) {
+            inputCaptureHoldMaxGapMs = Math.max(inputCaptureHoldMaxGapMs,
+                    eventTime - inputCaptureHoldLastMs);
+        }
+        inputCaptureHoldLastMs = eventTime;
+        updateInputCaptureStatus();
+    }
+
+    private void finishHoldPhase() {
+        if (!inputCaptureHoldPhase || inputCaptureSlot < 0) {
+            return;
+        }
+        int slot = inputCaptureSlot;
+        int keyCode = inputCaptureHoldKeyCode;
+        // 관측한 최대 간격에 여유를 둔다. 반복이 아예 없으면 0으로 두고 기본값을 쓴다.
+        long gap = inputCaptureHoldMaxGapMs > 0L ? inputCaptureHoldMaxGapMs + 300L : 0L;
+        inputCaptureHoldPhase = false;
+        inputCaptureHoldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        finishInputCaptureWithKey(keyCode);
+        MappingStore.saveLongTriggerRepeatGap(this, slot, gap);
+    }
+
     private boolean handleInputCaptureKeyEvent(KeyEvent event) {
         if (!acceptsInputDevice(event.getDevice())) {
             return false;
+        }
+
+        if (inputCaptureHoldPhase) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN
+                    && event.getKeyCode() == inputCaptureHoldKeyCode) {
+                recordHoldPhaseSignal(event.getEventTime());
+            }
+            return true;
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
             inputCaptureKeyCode = event.getKeyCode();
@@ -758,7 +814,12 @@ public class TouchAccessibilityService extends AccessibilityService {
             }
             int keyCode = inputCaptureKeyCode;
             inputCaptureKeyCode = KeyEvent.KEYCODE_UNKNOWN;
-            if (inputCaptureLongMode || !selectedDeviceSupportsMotionLearning()) {
+            if (inputCaptureLongMode) {
+                // 동작에 거는 키다. 이어서 5초간 눌러 반복 간격을 재고 저장한다.
+                startHoldPhase(keyCode);
+                return true;
+            }
+            if (!selectedDeviceSupportsMotionLearning()) {
                 finishInputCaptureWithKey(keyCode);
                 return true;
             }
@@ -939,6 +1000,12 @@ public class TouchAccessibilityService extends AccessibilityService {
 
     private void updateInputCaptureStatus() {
         if (inputCaptureStatus == null) {
+            return;
+        }
+        if (inputCaptureHoldPhase) {
+            inputCaptureStatus.setText("같은 버튼을 5초간 계속 누르고 계세요.\n"
+                    + "신호 " + (inputCaptureHoldLastMs > 0L ? "감지됨" : "대기 중")
+                    + (inputCaptureHoldMaxGapMs > 0L ? "  간격 " + inputCaptureHoldMaxGapMs + "ms" : ""));
             return;
         }
         int unique = inputCaptureSampleSignatures.isEmpty() && inputCaptureSampleKeyCode != KeyEvent.KEYCODE_UNKNOWN
@@ -1153,6 +1220,18 @@ public class TouchAccessibilityService extends AccessibilityService {
      * 마지막 신호 시각은 통과 여부와 상관없이 항상 갱신한다. 통과한 것만 갱신하면
      * 계속 누르고 있는 동안 고정 간격마다 한 번씩 다시 발동한다.
      */
+    /** 이 키에 걸린 동작이 학습해 둔 반복 간격. 없으면 기본값. */
+    private long burstGapFor(int keyCode) {
+        MappingStore.Mapping mapping = MappingStore.findByLongKeyCode(this, keyCode);
+        if (mapping != null) {
+            long learned = MappingStore.longTriggerRepeatGap(this, mapping.slot);
+            if (learned > 0L) {
+                return learned;
+            }
+        }
+        return VOLUME_KEY_BURST_GAP_MS;
+    }
+
     private boolean shouldSuppressRepeatedVolumeKey(KeyEvent event) {
         if (!isVolumeKey(event.getKeyCode()) || event.getAction() != KeyEvent.ACTION_DOWN) {
             return false;
@@ -1160,7 +1239,7 @@ public class TouchAccessibilityService extends AccessibilityService {
 
         long eventTime = event.getEventTime();
         boolean sameBurst = event.getKeyCode() == lastAcceptedVolumeKeyCode
-                && eventTime - lastAcceptedVolumeKeyMs < VOLUME_KEY_BURST_GAP_MS;
+                && eventTime - lastAcceptedVolumeKeyMs < burstGapFor(event.getKeyCode());
 
         lastAcceptedVolumeKeyCode = event.getKeyCode();
         lastAcceptedVolumeKeyMs = eventTime;
@@ -2733,6 +2812,11 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureSampleDirection = MappingStore.TRIGGER_UNKNOWN;
         inputCaptureSampleSignatures.clear();
         inputCaptureAnchors.clear();
+        inputCaptureHoldPhase = false;
+        inputCaptureHoldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        inputCaptureHoldLastMs = 0L;
+        inputCaptureHoldMaxGapMs = 0L;
+        mainHandler.removeCallbacks(finishHoldPhaseRunnable);
         inputCaptureStatus = null;
         updateMotionCapture();
 
@@ -3227,6 +3311,11 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureSampleDirection = MappingStore.TRIGGER_UNKNOWN;
         inputCaptureSampleSignatures.clear();
         inputCaptureAnchors.clear();
+        inputCaptureHoldPhase = false;
+        inputCaptureHoldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+        inputCaptureHoldLastMs = 0L;
+        inputCaptureHoldMaxGapMs = 0L;
+        mainHandler.removeCallbacks(finishHoldPhaseRunnable);
         inputCaptureStatus = null;
         updateMotionCapture();
         if (inputCaptureOverlay == null || windowManager == null) {

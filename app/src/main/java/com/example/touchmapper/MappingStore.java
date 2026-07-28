@@ -36,6 +36,7 @@ final class MappingStore {
     private static final String TRIGGER_TYPE = "trigger_type_";
     private static final String TRIGGER_VALUE = "trigger_value_";
     private static final String TRIGGER_SIGNATURE = "trigger_signature_";
+    private static final String LONG_TRIGGER_REPEAT_GAP = "long_trigger_repeat_gap_";
     private static final String ANCHOR_MIN_X = "anchor_min_x_";
     private static final String ANCHOR_MIN_Y = "anchor_min_y_";
     private static final String ANCHOR_MAX_X = "anchor_max_x_";
@@ -421,6 +422,27 @@ final class MappingStore {
         }
         String name = KeyEvent.keyCodeToString(keyCode);
         return name.startsWith("KEYCODE_") ? name.substring("KEYCODE_".length()) : name;
+    }
+
+    /**
+     * 이 동작에 걸린 키를 계속 누르고 있을 때 신호가 다시 오기까지의 간격.
+     *
+     * 컨트롤러마다 다르다. 한 번 누름을 여러 신호로 쪼개 보내는 기기가 있어서,
+     * 이 간격 안에 들어온 신호는 같은 누름으로 묶어야 토글이 여러 번 뒤집히지 않는다.
+     * 0이면 관측된 적이 없다는 뜻이고 기본값을 쓴다.
+     */
+    static void saveLongTriggerRepeatGap(Context context, int slot, long gapMs) {
+        ensureInputBindingsMigrated(context);
+        prefs(context).edit()
+                .putLong(inputProfileKey(LONG_TRIGGER_REPEAT_GAP, context, clampSlot(slot)),
+                        Math.max(0L, gapMs))
+                .apply();
+    }
+
+    static long longTriggerRepeatGap(Context context, int slot) {
+        ensureInputBindingsMigrated(context);
+        return prefs(context).getLong(
+                inputProfileKey(LONG_TRIGGER_REPEAT_GAP, context, clampSlot(slot)), 0L);
     }
 
     /**
