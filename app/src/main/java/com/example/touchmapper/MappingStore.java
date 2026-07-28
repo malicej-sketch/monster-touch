@@ -38,6 +38,7 @@ final class MappingStore {
     private static final String TRIGGER_SIGNATURE = "trigger_signature_";
     private static final String LONG_TRIGGER_REPEAT_GAP = "long_trigger_repeat_gap_";
     private static final String LONG_TRIGGER_HOLD = "long_trigger_hold_";
+    private static final String MOTION_SIGNATURES_MIGRATED = "motion_signatures_migrated_v5";
     private static final String ANCHOR_MIN_X = "anchor_min_x_";
     private static final String ANCHOR_MIN_Y = "anchor_min_y_";
     private static final String ANCHOR_MAX_X = "anchor_max_x_";
@@ -126,6 +127,7 @@ final class MappingStore {
 
     static Mapping get(Context context, int slot) {
         ensureInputBindingsMigrated(context);
+        ensureMotionSignaturesMigrated(context);
         SharedPreferences prefs = prefs(context);
         int safeSlot = clampSlot(slot);
         int keyCode = prefs.getInt(inputProfileKey(KEY_CODE, context, safeSlot), KeyEvent.KEYCODE_UNKNOWN);
@@ -432,6 +434,44 @@ final class MappingStore {
      * 이 간격 안에 들어온 신호는 같은 누름으로 묶어야 토글이 여러 번 뒤집히지 않는다.
      * 0이면 관측된 적이 없다는 뜻이고 기본값을 쓴다.
      */
+    /**
+     * 모션 시그니처의 좌표 기준이 화면 크기에서 컨트롤러 좌표 범위로 바뀌었다.
+     * 예전 값은 저장 당시 화면을 기준으로 계산된 것이라 지금 기준과 맞지 않는다.
+     * 어떤 화면에서 만들어졌는지 기록해 두지 않았으므로 환산할 수도 없다.
+     *
+     * 맞지 않는 값을 남겨두면 엉뚱한 버튼이 눌리거나 아무 반응이 없다. 지우고 다시 등록받는다.
+     * 키 트리거는 화면과 무관하므로 그대로 둔다.
+     */
+    private static void ensureMotionSignaturesMigrated(Context context) {
+        SharedPreferences prefs = prefs(context);
+        if (prefs.getBoolean(MOTION_SIGNATURES_MIGRATED, false)) {
+            return;
+        }
+
+        SharedPreferences.Editor editor = prefs.edit();
+        for (String key : new ArrayList<>(prefs.getAll().keySet())) {
+            if (key.contains(TRIGGER_SIGNATURE) || key.contains(LONG_TRIGGER_SIGNATURE)
+                    || key.contains(ANCHOR_MIN_X) || key.contains(ANCHOR_MIN_Y)
+                    || key.contains(ANCHOR_MAX_X) || key.contains(ANCHOR_MAX_Y)
+                    || key.contains(TRAP_ZONE_COUNT) || key.contains(TRAP_ZONE_X)
+                    || key.contains(TRAP_ZONE_Y) || key.contains(TRAP_ZONE_W)
+                    || key.contains(TRAP_ZONE_H)) {
+                editor.remove(key);
+                continue;
+            }
+            // 모션으로 등록된 트리거만 지운다. 키 트리거는 화면과 무관하다.
+            if (key.contains(TRIGGER_TYPE) || key.contains(LONG_TRIGGER_TYPE)) {
+                Object value = prefs.getAll().get(key);
+                if (value instanceof Integer && (Integer) value == TRIGGER_MOUSE_GESTURE) {
+                    editor.remove(key);
+                    editor.remove(key.replace(TRIGGER_TYPE, TRIGGER_VALUE)
+                            .replace(LONG_TRIGGER_TYPE, LONG_TRIGGER_VALUE));
+                }
+            }
+        }
+        editor.putBoolean(MOTION_SIGNATURES_MIGRATED, true).apply();
+    }
+
     static void saveLongTriggerRepeatGap(Context context, int slot, long gapMs) {
         ensureInputBindingsMigrated(context);
         prefs(context).edit()

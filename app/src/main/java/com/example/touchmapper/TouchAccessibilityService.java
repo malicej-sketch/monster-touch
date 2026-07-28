@@ -205,6 +205,12 @@ public class TouchAccessibilityService extends AccessibilityService {
         long startTime;
         long endTime;
         int moveCount;
+        /**
+         * 이 컨트롤러가 내는 좌표의 최대값. Android가 기기 좌표계를 화면 크기로 늘려서
+         * 전달하므로, 이 값으로 나누면 화면 크기와 무관한 0~1 값이 된다.
+         */
+        float rangeX;
+        float rangeY;
 
         void reset() {
             active = false;
@@ -216,12 +222,18 @@ public class TouchAccessibilityService extends AccessibilityService {
             startTime = 0L;
             endTime = 0L;
             moveCount = 0;
+            rangeX = 0f;
+            rangeY = 0f;
         }
 
         boolean record(MotionEvent event) {
             int action = event.getActionMasked();
             if (!active && !isStartAction(event)) {
                 return false;
+            }
+
+            if (rangeX <= 0f || rangeY <= 0f) {
+                captureRange(event);
             }
 
             if (!active) {
@@ -253,6 +265,26 @@ public class TouchAccessibilityService extends AccessibilityService {
             endY = event.getRawY();
             endTime = event.getEventTime();
             return action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_BUTTON_RELEASE;
+        }
+
+        /**
+         * 컨트롤러가 내는 좌표 범위를 읽어둔다. 못 읽으면 화면 크기로 대신한다.
+         * 화면 크기는 회전이나 해상도 변경에 흔들리므로 기기 범위가 있으면 그쪽을 쓴다.
+         */
+        private void captureRange(MotionEvent event) {
+            InputDevice device = event.getDevice();
+            if (device != null) {
+                int source = event.getSource();
+                InputDevice.MotionRange rx = device.getMotionRange(MotionEvent.AXIS_X, source);
+                InputDevice.MotionRange ry = device.getMotionRange(MotionEvent.AXIS_Y, source);
+                if (rx != null && ry != null && rx.getRange() > 0f && ry.getRange() > 0f) {
+                    rangeX = rx.getRange();
+                    rangeY = ry.getRange();
+                    return;
+                }
+            }
+            rangeX = 0f;
+            rangeY = 0f;
         }
 
         private static boolean isStartAction(MotionEvent event) {
@@ -918,7 +950,11 @@ public class TouchAccessibilityService extends AccessibilityService {
             inputCaptureMotionSignature = MappingStore.learnedRemoteButtonSignature(this, learnedIndex);
         }
         if (inputCaptureBurst.hasAnchor) {
-            inputCaptureAnchors.add(new float[]{inputCaptureBurst.anchorX, inputCaptureBurst.anchorY});
+            // 화면 크기가 아니라 0~1 비율로 저장한다. 회전이나 해상도 변경, 기기 교체에도
+            // 같은 값이 나온다. 트랩 존을 만들 때만 그때의 화면 크기로 환산한다.
+            inputCaptureAnchors.add(new float[]{
+                    inputCaptureBurst.anchorX / burstScaleX(inputCaptureBurst),
+                    inputCaptureBurst.anchorY / burstScaleY(inputCaptureBurst)});
         }
         inputCaptureBurst.reset();
         recordInputCaptureSample(inputCaptureMotionSignature, direction, KeyEvent.KEYCODE_UNKNOWN);
@@ -1920,14 +1956,15 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (range == null) {
             return null;
         }
+        // 저장값은 0~1 비율이다. 지금 화면 크기로 환산한다.
         float margin = dp(24);
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
         int screenHeight = getResources().getDisplayMetrics().heightPixels;
         return new RectF(
-                Math.max(0f, range[0] - margin),
-                Math.max(0f, range[1] - margin),
-                Math.min(screenWidth, range[2] + margin),
-                Math.min(screenHeight, range[3] + margin));
+                Math.max(0f, range[0] * screenWidth - margin),
+                Math.max(0f, range[1] * screenHeight - margin),
+                Math.min(screenWidth, range[2] * screenWidth + margin),
+                Math.min(screenHeight, range[3] * screenHeight + margin));
     }
 
     private void mergeAnchorZone(List<RectF> zones, RectF zone) {
@@ -2376,16 +2413,35 @@ public class TouchAccessibilityService extends AccessibilityService {
         return "S" + direction + ":" + sx + "," + sy + ">" + ex + "," + ey;
     }
 
+    /**
+     * 이 버스트의 좌표를 나눌 기준값. 컨트롤러가 알려준 범위가 있으면 그것을 쓰고,
+     * 없으면 화면 크기로 대신한다.
+     *
+     * 화면 크기를 기준으로 삼으면 회전, 해상도 변경, 기기 교체에 전부 흔들린다.
+     * 같은 버튼을 눌러도 다른 시그니처가 나와 등록해 둔 것이 맞지 않게 된다.
+     */
+    private float burstScaleX(MotionBurst burst) {
+        return burst.rangeX > 0f
+                ? burst.rangeX
+                : Math.max(1, getResources().getDisplayMetrics().widthPixels);
+    }
+
+    private float burstScaleY(MotionBurst burst) {
+        return burst.rangeY > 0f
+                ? burst.rangeY
+                : Math.max(1, getResources().getDisplayMetrics().heightPixels);
+    }
+
     private String motionBurstSignature(MotionBurst burst) {
         if (burst == null || !burst.hasAnchor) {
             return "";
         }
-        int screenWidth = Math.max(1, getResources().getDisplayMetrics().widthPixels);
-        int screenHeight = Math.max(1, getResources().getDisplayMetrics().heightPixels);
-        int ax = quantize(burst.anchorX, screenWidth, 12);
-        int ay = quantize(burst.anchorY, screenHeight, 16);
-        int ex = quantize(burst.endX, screenWidth, 12);
-        int ey = quantize(burst.endY, screenHeight, 16);
+        float scaleX = burstScaleX(burst);
+        float scaleY = burstScaleY(burst);
+        int ax = quantize(burst.anchorX, scaleX, 12);
+        int ay = quantize(burst.anchorY, scaleY, 16);
+        int ex = quantize(burst.endX, scaleX, 12);
+        int ey = quantize(burst.endY, scaleY, 16);
         int direction = motionBurstDirection(burst);
         long duration = Math.max(0L, burst.endTime - burst.startTime);
         String timeBucket = duration < 80L ? "S" : duration < 260L ? "M" : "L";
@@ -2401,12 +2457,12 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (burst == null || !burst.hasAnchor) {
             return MappingStore.TRIGGER_UNKNOWN;
         }
-        int screenWidth = Math.max(1, getResources().getDisplayMetrics().widthPixels);
-        int screenHeight = Math.max(1, getResources().getDisplayMetrics().heightPixels);
-        int ax = quantize(burst.anchorX, screenWidth, 12);
-        int ay = quantize(burst.anchorY, screenHeight, 16);
-        int ex = quantize(burst.endX, screenWidth, 12);
-        int ey = quantize(burst.endY, screenHeight, 16);
+        float scaleX = burstScaleX(burst);
+        float scaleY = burstScaleY(burst);
+        int ax = quantize(burst.anchorX, scaleX, 12);
+        int ay = quantize(burst.anchorY, scaleY, 16);
+        int ex = quantize(burst.endX, scaleX, 12);
+        int ey = quantize(burst.endY, scaleY, 16);
         int dx = ex - ax;
         int dy = ey - ay;
         if (Math.max(Math.abs(dx), Math.abs(dy)) <= 1) {
@@ -2521,7 +2577,10 @@ public class TouchAccessibilityService extends AccessibilityService {
         return "A" + ax + "," + ay;
     }
 
-    private int quantize(float value, int max, int bins) {
+    private int quantize(float value, float max, int bins) {
+        if (max <= 0f) {
+            return 0;
+        }
         int bin = (int) Math.floor((Math.max(0f, Math.min(value, max - 1f)) / max) * bins);
         return Math.max(0, Math.min(bins - 1, bin));
     }
