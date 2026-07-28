@@ -9,6 +9,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.view.Gravity;
 import android.view.InputDevice;
 import android.widget.Button;
 import android.widget.EditText;
@@ -324,7 +325,7 @@ public class MainActivity extends Activity {
         String lockText = TouchAccessibilityService.isTouchLocked() ? "터치 잠금 ON" : "터치 잠금 OFF";
         String positionText = TouchAccessibilityService.arePositionsVisible() ? "위치 표시 ON" : "위치 표시 OFF";
         statusText.setText(TouchAccessibilityService.isRunning()
-                ? "접근성 ON · " + positionText + " · " + lockText + " · 2초 길게 누르기: 1 위치표시, 4 잠금"
+                ? "접근성 ON · " + positionText + " · " + lockText
                 : "먼저 접근성 설정에서 " + getString(R.string.accessibility_service_label) + "를 켜주세요.");
 
         mappingsContainer.removeAllViews();
@@ -337,55 +338,39 @@ public class MainActivity extends Activity {
         MappingStore.Mapping mapping = MappingStore.get(this, slot);
 
         LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(dp(16), dp(16), dp(16), dp(16));
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(18), dp(18), dp(18), dp(18));
         row.setBackground(roundedStroke(COLOR_SURFACE, dp(8), COLOR_BORDER, 1));
         row.setElevation(dp(1));
+        row.setClickable(true);
+        row.setOnClickListener(view -> showSlotOptions(slot));
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("버튼 " + (slot + 1) + " · " + mapping.name + (slot == MappingStore.LOCK_SLOT ? " · 잠금" : ""));
+        title.setText(slotTitle(slot, mapping));
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextSize(18f);
         title.setTextColor(COLOR_TEXT);
-        row.addView(title);
+        texts.addView(title);
 
         TextView detail = new TextView(this);
-        detail.setTextSize(14f);
+        detail.setTextSize(15f);
         detail.setTextColor(COLOR_MUTED);
-        detail.setPadding(0, dp(8), 0, dp(10));
-        detail.setText("키: " + keyLabel(mapping) + "\n위치: " + pointLabel(mapping));
-        row.addView(detail);
+        detail.setPadding(0, dp(4), 0, 0);
+        detail.setText(MappingStore.triggerDisplayLabel(mapping) + " · " + pointLabel(mapping));
+        texts.addView(detail);
 
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.HORIZONTAL);
+        row.addView(texts, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        Button captureButton = makeSmallButton("키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
-        captureButton.setOnClickListener(view -> {
-            boolean started = TouchAccessibilityService.showInputCaptureOverlay(slot);
-            if (started) {
-                Toast.makeText(this, "학습 화면 안내에 따라 리모컨 버튼을 눌러주세요.", Toast.LENGTH_SHORT).show();
-            } else {
-                showLearningUnavailableDialog();
-            }
-        });
-        actions.addView(captureButton, utilityButtonParams());
-
-        Button longCaptureButton = makeSmallButton("Long", 0xFFFFF7ED, 0xFFC2410C);
-        longCaptureButton.setOnClickListener(view -> {
-            boolean started = TouchAccessibilityService.showInputCaptureOverlay(slot, true);
-            if (started) {
-                Toast.makeText(this, "Press and hold the remote button.", Toast.LENGTH_SHORT).show();
-            } else {
-                showLearningUnavailableDialog();
-            }
-        });
-        actions.addView(longCaptureButton, utilityButtonParams());
-
-        Button nameButton = makeSmallButton("이름 변경", 0xFFF1F5F9, COLOR_TEXT);
-        nameButton.setOnClickListener(view -> showButtonNameEditor(slot));
-        actions.addView(nameButton, utilityButtonParams());
-
-        row.addView(actions, matchWidthParams());
+        TextView chevron = new TextView(this);
+        chevron.setText("›");
+        chevron.setTextSize(24f);
+        chevron.setTextColor(COLOR_MUTED);
+        chevron.setPadding(dp(12), 0, 0, 0);
+        row.addView(chevron);
 
         LinearLayout.LayoutParams rowParams = matchWidthParams();
         rowParams.setMargins(0, 0, 0, dp(12));
@@ -394,11 +379,38 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private String keyLabel(MappingStore.Mapping mapping) {
-        if (!mapping.hasKey()) {
-            return "미지정";
+    private String slotTitle(int slot, MappingStore.Mapping mapping) {
+        String title = "버튼 " + (slot + 1);
+        if (MappingStore.hasCustomButtonName(this, slot)) {
+            title = title + " · " + mapping.name;
         }
-        return MappingStore.triggerLabel(mapping);
+        if (slot == MappingStore.LOCK_SLOT) {
+            title = title + " · 잠금";
+        }
+        return title;
+    }
+
+    private void showSlotOptions(int slot) {
+        String[] options = {"입력 등록", "롱 입력 등록", "이름 변경"};
+        new AlertDialog.Builder(this)
+                .setTitle(slotTitle(slot, MappingStore.get(this, slot)))
+                .setItems(options, (dialog, which) -> {
+                    if (which == 2) {
+                        showButtonNameEditor(slot);
+                        return;
+                    }
+                    boolean longMode = which == 1;
+                    boolean started = TouchAccessibilityService.showInputCaptureOverlay(slot, longMode);
+                    if (started) {
+                        Toast.makeText(this, longMode
+                                ? "리모컨 버튼을 길게 눌러주세요."
+                                : "학습 화면 안내에 따라 리모컨 버튼을 눌러주세요.", Toast.LENGTH_SHORT).show();
+                    } else {
+                        showLearningUnavailableDialog();
+                    }
+                })
+                .setNegativeButton("닫기", null)
+                .show();
     }
 
     private String pointLabel(MappingStore.Mapping mapping) {

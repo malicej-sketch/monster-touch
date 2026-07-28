@@ -367,6 +367,65 @@ final class MappingStore {
         }
     }
 
+    static String triggerDisplayLabel(Mapping mapping) {
+        return triggerDisplayLabel(mapping.triggerType, mapping.triggerValue);
+    }
+
+    static String longTriggerDisplayLabel(Mapping mapping) {
+        return triggerDisplayLabel(mapping.longTriggerType, mapping.longTriggerValue);
+    }
+
+    private static String triggerDisplayLabel(int triggerType, int triggerValue) {
+        if (triggerType == TRIGGER_KEY && triggerValue != TRIGGER_UNKNOWN) {
+            return keyDisplayLabel(triggerValue);
+        }
+        if (triggerType == TRIGGER_MOUSE_GESTURE) {
+            return "마우스 " + mouseDirectionDisplayLabel(triggerValue);
+        }
+        return "미지정";
+    }
+
+    static String mouseDirectionDisplayLabel(int direction) {
+        switch (direction) {
+            case MOUSE_UP:
+                return "위";
+            case MOUSE_DOWN:
+                return "아래";
+            case MOUSE_LEFT:
+                return "왼쪽";
+            case MOUSE_RIGHT:
+                return "오른쪽";
+            case MOUSE_STILL:
+                return "제자리";
+            default:
+                return "알 수 없음";
+        }
+    }
+
+    static String keyDisplayLabel(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_VOLUME_UP:
+                return "볼륨 위";
+            case KeyEvent.KEYCODE_VOLUME_DOWN:
+                return "볼륨 아래";
+            case KeyEvent.KEYCODE_VOLUME_MUTE:
+            case KeyEvent.KEYCODE_MUTE:
+                return "음소거";
+            default:
+                break;
+        }
+        String name = KeyEvent.keyCodeToString(keyCode);
+        return name.startsWith("KEYCODE_") ? name.substring("KEYCODE_".length()) : name;
+    }
+
+    static String defaultButtonName(int slot) {
+        return "Button " + (clampSlot(slot) + 1);
+    }
+
+    static boolean hasCustomButtonName(Context context, int slot) {
+        return !defaultButtonName(slot).equals(buttonName(context, slot));
+    }
+
     static void saveLearnedRemoteButton(Context context, int index, int direction, String signature) {
         if (isBlank(signature)) {
             return;
