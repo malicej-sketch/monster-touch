@@ -40,12 +40,16 @@ import java.util.List;
 
 public class TouchAccessibilityService extends AccessibilityService {
     private static final String PROBE_TAG = "TouchMapperProbe";
+    private static final String NO_SAVED_POINT_MESSAGE =
+            "저장된 위치가 없습니다. 먼저 위치 설정에서 버튼의 좌표를 지정해주세요.";
     private static final long LOCK_LONG_CLICK_MS = 2000L;
     private static final long MOVE_MARKER_LONG_PRESS_MS = 1000L;
+    private static final int MAX_VIBRATION_AMPLITUDE = 255;
     private static final long REMOTE_GESTURE_COOLDOWN_MS = 220L;
-    private static final long VOLUME_KEY_DEBOUNCE_MS = 1000L;
+    private static final long REMOTE_VOLUME_SUPPRESS_MS = 400L;
+    private static final long VOLUME_KEY_BURST_GAP_MS = 700L;
     private static final long INPUT_CAPTURE_KEY_GRACE_MS = 750L;
-    private static final int POSITION_TOGGLE_SLOT = 0;
+    private static final int POSITION_TOGGLE_SLOT = MappingStore.MARKER_TOGGLE_SLOT;
     private static final int INPUT_CAPTURE_SAMPLE_TARGET = 5;
     private static final int CONTROLLER_MOTION_SOURCES = InputDevice.SOURCE_MOUSE
             | InputDevice.SOURCE_MOUSE_RELATIVE
@@ -145,17 +149,16 @@ public class TouchAccessibilityService extends AccessibilityService {
     private long lastAcceptedVolumeKeyMs;
     private int heldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
     private int heldSlot = -1;
+    private int heldLongSlot = -1;
     private boolean longClickTriggered;
     private final Runnable lockLongClickRunnable = new Runnable() {
         @Override
         public void run() {
-            if (heldSlot == POSITION_TOGGLE_SLOT) {
-                longClickTriggered = true;
-                togglePositionOverlayFromButton();
-            } else if (heldSlot == MappingStore.LOCK_SLOT) {
-                longClickTriggered = true;
-                toggleTouchLock();
+            if (heldLongSlot < 0) {
+                return;
             }
+            longClickTriggered = true;
+            executeLongSlot(heldLongSlot);
         }
     };
     private final InputManager.InputDeviceListener inputDeviceListener = new InputManager.InputDeviceListener() {
@@ -271,11 +274,17 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (service.positionsVisible) {
             service.hidePositionOverlay();
             service.positionsVisible = false;
-        } else {
-            service.positionsVisible = true;
-            if (!configurationActive) {
-                service.showPositionOverlay();
-            }
+            return true;
+        }
+
+        if (!service.hasAnySavedPoint()) {
+            Toast.makeText(service, NO_SAVED_POINT_MESSAGE, Toast.LENGTH_LONG).show();
+            return true;
+        }
+
+        service.positionsVisible = true;
+        if (!configurationActive) {
+            service.showPositionOverlay();
         }
         return true;
     }
@@ -487,22 +496,25 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (longMapping == null) {
             longMapping = MappingStore.findByLongKeyCode(this, event.getKeyCode());
         }
-        if (longMapping != null) {
-            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
-                executeLongSlot(longMapping.slot);
-            }
-            return true;
-        }
 
         MappingStore.Mapping mapping = MappingStore.findByKeySignature(this, event.getKeyCode(), keySignature);
         if (mapping == null) {
             mapping = MappingStore.findByKeyCode(this, event.getKeyCode());
         }
+
         if (mapping == null) {
+            // 이 키는 동작 전용으로 등록된 별개 신호다. 누르는 즉시 실행한다.
+            if (longMapping != null) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                    executeLongSlot(longMapping.slot);
+                }
+                return true;
+            }
             return MappingStore.hasSelectedInputDevice(this);
         }
 
-        return handleMappedKey(event, mapping.slot);
+        // 같은 키에 탭과 동작이 함께 걸려 있으면 누른 시간으로 가른다.
+        return handleMappedKey(event, mapping.slot, longMapping);
     }
 
     @Override
@@ -668,13 +680,14 @@ public class TouchAccessibilityService extends AccessibilityService {
     public void onInterrupt() {
     }
 
-    private boolean handleMappedKey(KeyEvent event, int slot) {
+    private boolean handleMappedKey(KeyEvent event, int slot, MappingStore.Mapping longMapping) {
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             if (event.getRepeatCount() == 0) {
                 heldKeyCode = event.getKeyCode();
                 heldSlot = slot;
+                heldLongSlot = holdActionSlot(slot, longMapping);
                 longClickTriggered = false;
-                if (slot == POSITION_TOGGLE_SLOT || slot == MappingStore.LOCK_SLOT) {
+                if (heldLongSlot >= 0) {
                     mainHandler.postDelayed(lockLongClickRunnable, LOCK_LONG_CLICK_MS);
                 }
             }
@@ -686,6 +699,7 @@ public class TouchAccessibilityService extends AccessibilityService {
             int releasedSlot = heldSlot;
             heldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
             heldSlot = -1;
+            heldLongSlot = -1;
 
             if (!longClickTriggered) {
                 executeSlot(releasedSlot);
@@ -695,6 +709,23 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
 
         return true;
+    }
+
+    /**
+     * 이 키를 계속 누르고 있을 때 발동할 동작 슬롯. 없으면 -1.
+     *
+     * 명시적으로 등록된 롱 바인딩이 우선한다. 등록된 것이 없으면 버튼 1/4에 한해
+     * 기존 암묵 동작(위치 표시 / 화면 잠금)을 유지한다. 키만 내보내는 HID 컨트롤러는
+     * 남는 신호가 없어 이 암묵 경로에 의존한다.
+     */
+    private int holdActionSlot(int slot, MappingStore.Mapping longMapping) {
+        if (longMapping != null) {
+            return longMapping.slot;
+        }
+        if (slot == POSITION_TOGGLE_SLOT || slot == MappingStore.LOCK_SLOT) {
+            return slot;
+        }
+        return -1;
     }
 
     private boolean handleInputCaptureKeyEvent(KeyEvent event) {
@@ -1077,19 +1108,26 @@ public class TouchAccessibilityService extends AccessibilityService {
                 || keyCode == KeyEvent.KEYCODE_MUTE;
     }
 
+    /**
+     * 볼륨키를 한 번 누르면 컨트롤러가 같은 신호를 0.3~0.5초 간격으로 계속 흘린다.
+     * 토글 동작에 그대로 연결하면 켜졌다 꺼졌다를 반복하므로, 신호가 끊길 때까지를
+     * 한 번의 누름으로 묶는다. 첫 신호만 통과시키고 나머지는 버린다.
+     *
+     * 마지막 신호 시각은 통과 여부와 상관없이 항상 갱신한다. 통과한 것만 갱신하면
+     * 계속 누르고 있는 동안 고정 간격마다 한 번씩 다시 발동한다.
+     */
     private boolean shouldSuppressRepeatedVolumeKey(KeyEvent event) {
         if (!isVolumeKey(event.getKeyCode()) || event.getAction() != KeyEvent.ACTION_DOWN) {
             return false;
         }
 
-        if (event.getKeyCode() == lastAcceptedVolumeKeyCode
-                && event.getEventTime() - lastAcceptedVolumeKeyMs < VOLUME_KEY_DEBOUNCE_MS) {
-            return true;
-        }
+        long eventTime = event.getEventTime();
+        boolean sameBurst = event.getKeyCode() == lastAcceptedVolumeKeyCode
+                && eventTime - lastAcceptedVolumeKeyMs < VOLUME_KEY_BURST_GAP_MS;
 
         lastAcceptedVolumeKeyCode = event.getKeyCode();
-        lastAcceptedVolumeKeyMs = event.getEventTime();
-        return false;
+        lastAcceptedVolumeKeyMs = eventTime;
+        return sameBurst;
     }
 
     private boolean acceptsInputDevice(InputDevice inputDevice) {
@@ -1836,7 +1874,13 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (!isAcceptedMouseEvent(event)) {
             return false;
         }
-        remoteVolumeSuppressUntilMs = Math.max(remoteVolumeSuppressUntilMs, event.getEventTime() + 1800L);
+        // 커서를 옮기는 이동 신호까지 볼륨키를 막으면 안 된다. LP-910은 버튼을 누를 때마다
+        // 커서를 구석으로 보냈다 되돌리는 신호를 먼저 흘리는데, 그 직후에 오는 볼륨키가
+        // 통째로 버려진다. 실제로 버튼이 눌린 이벤트에서만 짧게 막는다.
+        if (isRemoteAnchorEvent(event)) {
+            remoteVolumeSuppressUntilMs = Math.max(remoteVolumeSuppressUntilMs,
+                    event.getEventTime() + REMOTE_VOLUME_SUPPRESS_MS);
+        }
 
         boolean finished = remoteGestureBurst.record(event);
         if (!finished) {
@@ -2290,6 +2334,11 @@ public class TouchAccessibilityService extends AccessibilityService {
     }
 
     private void togglePositionOverlayFromButton() {
+        if (!positionsVisible && !hasAnySavedPoint()) {
+            Toast.makeText(this, NO_SAVED_POINT_MESSAGE, Toast.LENGTH_LONG).show();
+            return;
+        }
+
         positionsVisible = !positionsVisible;
         if (positionsVisible) {
             if (!configurationActive) {
@@ -2300,6 +2349,16 @@ public class TouchAccessibilityService extends AccessibilityService {
             hidePositionOverlay();
             Toast.makeText(this, "위치 표시 OFF", Toast.LENGTH_SHORT).show();
         }
+    }
+
+    /** 좌표가 저장된 버튼이 하나라도 있는지. 하나도 없으면 위치 표시를 켜도 보여줄 것이 없다. */
+    private boolean hasAnySavedPoint() {
+        for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
+            if (MappingStore.get(this, slot).hasPoint()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void restoreTemporaryOverlaysIfNeeded(boolean restoreLockOverlay, boolean restorePositionOverlay,
@@ -2324,7 +2383,8 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE));
+            // 장갑을 낀 채로도 느껴야 하므로 기본 세기 대신 최대 진폭을 쓴다.
+            vibrator.vibrate(VibrationEffect.createOneShot(durationMs, MAX_VIBRATION_AMPLITUDE));
         } else {
             vibrator.vibrate(durationMs);
         }
@@ -3193,7 +3253,7 @@ public class TouchAccessibilityService extends AccessibilityService {
             @Override
             public void run() {
                 moving = true;
-                vibrate(90);
+                vibrate(180);
                 Toast.makeText(TouchAccessibilityService.this, "위치 이동 모드", Toast.LENGTH_SHORT).show();
             }
         };
@@ -3235,7 +3295,7 @@ public class TouchAccessibilityService extends AccessibilityService {
                     float centerX = params.x + view.getWidth() / 2f;
                     float centerY = params.y + view.getHeight() / 2f;
                     MappingStore.savePoint(TouchAccessibilityService.this, slot, centerX, centerY);
-                    vibrate(45);
+                    vibrate(90);
                     Toast.makeText(TouchAccessibilityService.this, "버튼 " + (slot + 1) + " 위치 이동 완료", Toast.LENGTH_SHORT).show();
                 }
                 moving = false;

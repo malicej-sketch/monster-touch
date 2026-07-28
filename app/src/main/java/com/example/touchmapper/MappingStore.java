@@ -11,6 +11,7 @@ final class MappingStore {
     static final int SLOT_COUNT = 4;
     static final int PROFILE_COUNT = 4;
     static final int LOCK_SLOT = 3;
+    static final int MARKER_TOGGLE_SLOT = 0;
     static final int TRIGGER_KEY = 0;
     static final int TRIGGER_MOUSE_GESTURE = 1;
     static final int TRIGGER_UNKNOWN = -1;

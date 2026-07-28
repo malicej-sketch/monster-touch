@@ -14,8 +14,8 @@ android {
         applicationId "com.example.touchmapper"
         minSdk 26
         targetSdk 35
-        versionCode 58
-        versionName "A-0.1.50"
+        versionCode 60
+        versionName "A-0.1.52"
         manifestPlaceholders = [
                 appIcon     : "@mipmap/ic_launcher",
                 appRoundIcon: "@mipmap/ic_launcher_round"

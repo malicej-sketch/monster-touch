@@ -220,14 +220,6 @@ public class MainActivity extends Activity {
         });
         diagnosticActions.addView(analyzerButton, utilityButtonParams());
 
-        TextView sectionTitle = new TextView(this);
-        sectionTitle.setText("버튼 4개");
-        sectionTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        sectionTitle.setTextSize(16f);
-        sectionTitle.setTextColor(COLOR_TEXT);
-        sectionTitle.setPadding(0, dp(16), 0, 0);
-        root.addView(sectionTitle);
-
         mappingsContainer = new LinearLayout(this);
         mappingsContainer.setOrientation(LinearLayout.VERTICAL);
         mappingsContainer.setPadding(0, dp(12), 0, 0);
@@ -329,9 +321,39 @@ public class MainActivity extends Activity {
                 : "먼저 접근성 설정에서 " + getString(R.string.accessibility_service_label) + "를 켜주세요.");
 
         mappingsContainer.removeAllViews();
+
+        mappingsContainer.addView(sectionTitle("동작", 0));
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.addView(actionCell("위치 표시", MappingStore.MARKER_TOGGLE_SLOT), halfWidthParams(true));
+        actions.addView(actionCell("화면 잠금", MappingStore.LOCK_SLOT), halfWidthParams(false));
+        mappingsContainer.addView(actions, matchWidthParams());
+
+        mappingsContainer.addView(sectionTitle("버튼 4개", dp(8)));
         for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
             mappingsContainer.addView(mappingRow(slot));
         }
+    }
+
+    private TextView sectionTitle(String text, int topPadding) {
+        TextView title = new TextView(this);
+        title.setText(text);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextSize(16f);
+        title.setTextColor(COLOR_TEXT);
+        title.setPadding(0, topPadding, 0, dp(12));
+        return title;
+    }
+
+    private LinearLayout.LayoutParams halfWidthParams(boolean first) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        params.setMargins(0, 0, first ? dp(6) : 0, 0);
+        if (!first) {
+            params.setMargins(dp(6), 0, 0, 0);
+        }
+        return params;
     }
 
     private LinearLayout mappingRow(int slot) {
@@ -343,8 +365,6 @@ public class MainActivity extends Activity {
         row.setPadding(dp(18), dp(18), dp(18), dp(18));
         row.setBackground(roundedStroke(COLOR_SURFACE, dp(8), COLOR_BORDER, 1));
         row.setElevation(dp(1));
-        row.setClickable(true);
-        row.setOnClickListener(view -> showSlotOptions(slot));
 
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
@@ -365,12 +385,13 @@ public class MainActivity extends Activity {
 
         row.addView(texts, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView chevron = new TextView(this);
-        chevron.setText("›");
-        chevron.setTextSize(24f);
-        chevron.setTextColor(COLOR_MUTED);
-        chevron.setPadding(dp(12), 0, 0, 0);
-        row.addView(chevron);
+        Button captureButton = makeSmallButton("키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
+        captureButton.setOnClickListener(view -> startInputCapture(slot, false));
+        row.addView(captureButton, rowButtonParams());
+
+        Button nameButton = makeSmallButton("이름 변경", 0xFFF1F5F9, COLOR_TEXT);
+        nameButton.setOnClickListener(view -> showButtonNameEditor(slot));
+        row.addView(nameButton, rowButtonParams());
 
         LinearLayout.LayoutParams rowParams = matchWidthParams();
         rowParams.setMargins(0, 0, 0, dp(12));
@@ -379,38 +400,59 @@ public class MainActivity extends Activity {
         return row;
     }
 
+    private LinearLayout actionCell(String label, int slot) {
+        MappingStore.Mapping mapping = MappingStore.get(this, slot);
+
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setPadding(dp(16), dp(16), dp(16), dp(16));
+        cell.setBackground(roundedStroke(COLOR_SURFACE, dp(8), COLOR_BORDER, 1));
+        cell.setElevation(dp(1));
+
+        TextView title = new TextView(this);
+        title.setText(label);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextSize(17f);
+        title.setTextColor(COLOR_TEXT);
+        cell.addView(title);
+
+        TextView detail = new TextView(this);
+        detail.setTextSize(14f);
+        detail.setTextColor(COLOR_MUTED);
+        detail.setPadding(0, dp(4), 0, dp(10));
+        detail.setText(MappingStore.longTriggerDisplayLabel(mapping));
+        cell.addView(detail);
+
+        Button captureButton = makeSmallButton("키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
+        captureButton.setOnClickListener(view -> startInputCapture(slot, true));
+        cell.addView(captureButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        return cell;
+    }
+
+    private void startInputCapture(int slot, boolean longMode) {
+        boolean started = TouchAccessibilityService.showInputCaptureOverlay(slot, longMode);
+        if (started) {
+            Toast.makeText(this, "학습 화면 안내에 따라 리모컨 버튼을 눌러주세요.", Toast.LENGTH_SHORT).show();
+        } else {
+            showLearningUnavailableDialog();
+        }
+    }
+
+    private LinearLayout.LayoutParams rowButtonParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                dp(96), LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(dp(8), 0, 0, 0);
+        return params;
+    }
+
     private String slotTitle(int slot, MappingStore.Mapping mapping) {
         String title = "버튼 " + (slot + 1);
         if (MappingStore.hasCustomButtonName(this, slot)) {
             title = title + " · " + mapping.name;
         }
-        if (slot == MappingStore.LOCK_SLOT) {
-            title = title + " · 잠금";
-        }
         return title;
-    }
-
-    private void showSlotOptions(int slot) {
-        String[] options = {"입력 등록", "롱 입력 등록", "이름 변경"};
-        new AlertDialog.Builder(this)
-                .setTitle(slotTitle(slot, MappingStore.get(this, slot)))
-                .setItems(options, (dialog, which) -> {
-                    if (which == 2) {
-                        showButtonNameEditor(slot);
-                        return;
-                    }
-                    boolean longMode = which == 1;
-                    boolean started = TouchAccessibilityService.showInputCaptureOverlay(slot, longMode);
-                    if (started) {
-                        Toast.makeText(this, longMode
-                                ? "리모컨 버튼을 길게 눌러주세요."
-                                : "학습 화면 안내에 따라 리모컨 버튼을 눌러주세요.", Toast.LENGTH_SHORT).show();
-                    } else {
-                        showLearningUnavailableDialog();
-                    }
-                })
-                .setNegativeButton("닫기", null)
-                .show();
     }
 
     private String pointLabel(MappingStore.Mapping mapping) {
