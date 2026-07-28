@@ -164,14 +164,7 @@ public class MainActivity extends Activity {
         root.addView(setupActions, matchWidthParams());
 
         Button setupPanelButton = makeButton("위치 설정", 0xFFEAF2FF, COLOR_PRIMARY);
-        setupPanelButton.setOnClickListener(view -> {
-            boolean started = TouchAccessibilityService.showSetupOverlay();
-            if (!started) {
-                Toast.makeText(this, "먼저 접근성 서비스를 켜주세요.", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            moveTaskToBack(true);
-        });
+        setupPanelButton.setOnClickListener(view -> startPositionSetup());
         setupActions.addView(setupPanelButton, utilityButtonParams());
 
         showPositionsButton = makeButton(
@@ -180,6 +173,10 @@ public class MainActivity extends Activity {
                 COLOR_TEXT
         );
         showPositionsButton.setOnClickListener(view -> {
+            if (!TouchAccessibilityService.arePositionsVisible() && !MappingStore.hasAnySavedPoint(this)) {
+                showNoSavedPointDialog();
+                return;
+            }
             boolean toggled = TouchAccessibilityService.togglePositionOverlay();
             if (!toggled) {
                 Toast.makeText(this, "먼저 접근성 서비스를 켜주세요.", Toast.LENGTH_SHORT).show();
@@ -432,12 +429,45 @@ public class MainActivity extends Activity {
     }
 
     private void startInputCapture(int slot, boolean longMode) {
+        if (!MappingStore.hasSelectedInputDevice(this)) {
+            showInputDeviceRequiredDialog();
+            return;
+        }
+
         boolean started = TouchAccessibilityService.showInputCaptureOverlay(slot, longMode);
         if (started) {
             Toast.makeText(this, "학습 화면 안내에 따라 리모컨 버튼을 눌러주세요.", Toast.LENGTH_SHORT).show();
         } else {
             showLearningUnavailableDialog();
         }
+    }
+
+    private void startPositionSetup() {
+        boolean started = TouchAccessibilityService.showSetupOverlay();
+        if (!started) {
+            Toast.makeText(this, "먼저 접근성 서비스를 켜주세요.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        moveTaskToBack(true);
+    }
+
+    private void showNoSavedPointDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("설정된 좌표 없음")
+                .setMessage("좌표가 저장된 버튼이 없습니다. 지금 위치를 설정하시겠습니까?")
+                .setNegativeButton("닫기", null)
+                .setPositiveButton("위치 설정", (dialog, which) -> startPositionSetup())
+                .show();
+    }
+
+    private void showInputDeviceRequiredDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("입력 장치를 먼저 선택해주세요")
+                .setMessage("어떤 컨트롤러의 신호를 학습할지 정해야 합니다. "
+                        + "선택하지 않으면 다른 기기의 입력까지 섞여 들어옵니다.")
+                .setNegativeButton("닫기", null)
+                .setPositiveButton("입력 장치 선택", (dialog, which) -> showInputDevicePicker())
+                .show();
     }
 
     private LinearLayout.LayoutParams rowButtonParams() {
@@ -538,8 +568,7 @@ public class MainActivity extends Activity {
 
     private void startControllerDiagnostic() {
         if (!MappingStore.hasSelectedInputDevice(this)) {
-            Toast.makeText(this, "Select the controller first.", Toast.LENGTH_SHORT).show();
-            showInputDevicePicker();
+            showInputDeviceRequiredDialog();
             return;
         }
 

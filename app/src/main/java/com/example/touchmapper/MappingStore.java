@@ -36,6 +36,10 @@ final class MappingStore {
     private static final String TRIGGER_TYPE = "trigger_type_";
     private static final String TRIGGER_VALUE = "trigger_value_";
     private static final String TRIGGER_SIGNATURE = "trigger_signature_";
+    private static final String ANCHOR_MIN_X = "anchor_min_x_";
+    private static final String ANCHOR_MIN_Y = "anchor_min_y_";
+    private static final String ANCHOR_MAX_X = "anchor_max_x_";
+    private static final String ANCHOR_MAX_Y = "anchor_max_y_";
     private static final String LONG_TRIGGER_TYPE = "long_trigger_type_";
     private static final String LONG_TRIGGER_VALUE = "long_trigger_value_";
     private static final String LONG_TRIGGER_SIGNATURE = "long_trigger_signature_";
@@ -417,6 +421,50 @@ final class MappingStore {
         }
         String name = KeyEvent.keyCodeToString(keyCode);
         return name.startsWith("KEYCODE_") ? name.substring("KEYCODE_".length()) : name;
+    }
+
+    /**
+     * 학습 중 관측한 DOWN 좌표의 범위를 기기·프로필·슬롯별로 저장한다.
+     * 트랩 존을 시그니처에서 역산하지 않고 이 값에서 직접 만들기 위한 것이다.
+     */
+    static void saveObservedAnchor(Context context, int slot, float minX, float minY,
+                                   float maxX, float maxY) {
+        ensureInputBindingsMigrated(context);
+        int safeSlot = clampSlot(slot);
+        prefs(context).edit()
+                .putFloat(inputProfileKey(ANCHOR_MIN_X, context, safeSlot), minX)
+                .putFloat(inputProfileKey(ANCHOR_MIN_Y, context, safeSlot), minY)
+                .putFloat(inputProfileKey(ANCHOR_MAX_X, context, safeSlot), maxX)
+                .putFloat(inputProfileKey(ANCHOR_MAX_Y, context, safeSlot), maxY)
+                .apply();
+    }
+
+    /** {minX, minY, maxX, maxY}. 관측된 적이 없으면 null. */
+    static float[] observedAnchor(Context context, int slot) {
+        ensureInputBindingsMigrated(context);
+        SharedPreferences prefs = prefs(context);
+        int safeSlot = clampSlot(slot);
+        float minX = prefs.getFloat(inputProfileKey(ANCHOR_MIN_X, context, safeSlot), -1f);
+        float minY = prefs.getFloat(inputProfileKey(ANCHOR_MIN_Y, context, safeSlot), -1f);
+        if (minX < 0f || minY < 0f) {
+            return null;
+        }
+        return new float[]{
+                minX,
+                minY,
+                prefs.getFloat(inputProfileKey(ANCHOR_MAX_X, context, safeSlot), minX),
+                prefs.getFloat(inputProfileKey(ANCHOR_MAX_Y, context, safeSlot), minY)
+        };
+    }
+
+    /** 좌표가 저장된 버튼이 하나라도 있는지. 하나도 없으면 위치 표시를 켜도 보여줄 것이 없다. */
+    static boolean hasAnySavedPoint(Context context) {
+        for (int slot = 0; slot < SLOT_COUNT; slot++) {
+            if (get(context, slot).hasPoint()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static String defaultButtonName(int slot) {

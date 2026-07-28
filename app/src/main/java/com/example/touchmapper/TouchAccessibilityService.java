@@ -14,6 +14,7 @@ import android.hardware.input.InputManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.util.Log;
@@ -40,14 +41,13 @@ import java.util.List;
 
 public class TouchAccessibilityService extends AccessibilityService {
     private static final String PROBE_TAG = "TouchMapperProbe";
-    private static final String NO_SAVED_POINT_MESSAGE =
-            "저장된 위치가 없습니다. 먼저 위치 설정에서 버튼의 좌표를 지정해주세요.";
     private static final long LOCK_LONG_CLICK_MS = 2000L;
     private static final long MOVE_MARKER_LONG_PRESS_MS = 1000L;
     private static final int MAX_VIBRATION_AMPLITUDE = 255;
     private static final long REMOTE_GESTURE_COOLDOWN_MS = 220L;
     private static final long REMOTE_VOLUME_SUPPRESS_MS = 400L;
     private static final long VOLUME_KEY_BURST_GAP_MS = 700L;
+    private static final long POST_CAPTURE_COOLDOWN_MS = 900L;
     private static final long INPUT_CAPTURE_KEY_GRACE_MS = 750L;
     private static final int POSITION_TOGGLE_SLOT = MappingStore.MARKER_TOGGLE_SLOT;
     private static final int INPUT_CAPTURE_SAMPLE_TARGET = 5;
@@ -147,6 +147,10 @@ public class TouchAccessibilityService extends AccessibilityService {
     private long remoteVolumeSuppressUntilMs;
     private int lastAcceptedVolumeKeyCode = KeyEvent.KEYCODE_UNKNOWN;
     private long lastAcceptedVolumeKeyMs;
+    /** 학습 중 관측한 실제 DOWN 좌표. 트랩 존을 여기서 직접 만든다. */
+    private final List<float[]> inputCaptureAnchors = new ArrayList<>();
+    private View noSavedPointOverlay;
+    private long inputCaptureCooldownUntilMs;
     private int heldKeyCode = KeyEvent.KEYCODE_UNKNOWN;
     private int heldSlot = -1;
     private int heldLongSlot = -1;
@@ -278,7 +282,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
 
         if (!service.hasAnySavedPoint()) {
-            Toast.makeText(service, NO_SAVED_POINT_MESSAGE, Toast.LENGTH_LONG).show();
+            // 앱에서 누른 경우다. 안내와 선택지는 MainActivity가 다이얼로그로 보여준다.
             return true;
         }
 
@@ -349,9 +353,11 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
         if (active) {
             service.hidePositionOverlay();
+            service.hideNoSavedPointPanel();
         } else if (service.positionsVisible) {
             service.showPositionOverlay();
         }
+        service.refreshRemoteTrapOverlay();
     }
 
     static boolean showSetupOverlay() {
@@ -476,7 +482,13 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
 
         if (configurationActive) {
-            return false;
+            // 설정 화면이 떠 있어도 선택된 컨트롤러의 키는 시스템으로 넘기지 않는다.
+            // 넘기면 동작에 등록해 둔 볼륨 키가 실제 볼륨을 조절해버린다.
+            return MappingStore.hasSelectedInputDevice(this) && acceptsInputDevice(inputDevice);
+        }
+
+        if (inPostCaptureCooldown(event.getEventTime())) {
+            return true;
         }
 
         if (isVolumeKey(event.getKeyCode()) && event.getEventTime() <= remoteVolumeSuppressUntilMs) {
@@ -565,6 +577,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         hideControllerAnalyzerPanel();
         hideControllerDiagnosticPanel();
         hideAdbProbePanel();
+        hideNoSavedPointPanel();
         hidePositionOverlay();
         hideTouchLockOverlay();
         hideRemoteTrapOverlay();
@@ -642,6 +655,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         hideControllerAnalyzerPanel();
         hideControllerDiagnosticPanel();
         hideAdbProbePanel();
+        hideNoSavedPointPanel();
         hidePositionOverlay();
         hideTouchLockOverlay();
         hideRemoteTrapOverlay();
@@ -790,6 +804,9 @@ public class TouchAccessibilityService extends AccessibilityService {
             direction = MappingStore.learnedRemoteButtonDirection(this, learnedIndex);
             inputCaptureMotionSignature = MappingStore.learnedRemoteButtonSignature(this, learnedIndex);
         }
+        if (inputCaptureBurst.hasAnchor) {
+            inputCaptureAnchors.add(new float[]{inputCaptureBurst.anchorX, inputCaptureBurst.anchorY});
+        }
         inputCaptureBurst.reset();
         recordInputCaptureSample(inputCaptureMotionSignature, direction, KeyEvent.KEYCODE_UNKNOWN);
         return true;
@@ -810,9 +827,26 @@ public class TouchAccessibilityService extends AccessibilityService {
         } else {
             MappingStore.saveKeyCode(this, slot, keyCode, signature);
         }
-        Toast.makeText(this, "버튼 " + (slot + 1) + " 입력 저장: " + KeyEvent.keyCodeToString(keyCode), Toast.LENGTH_SHORT).show();
+        startPostCaptureCooldown();
+        Toast.makeText(this, "버튼 " + (slot + 1) + " 입력 저장: "
+                + MappingStore.keyDisplayLabel(keyCode), Toast.LENGTH_SHORT).show();
         hideInputCapturePanel();
         MainActivity.refreshIfVisible();
+    }
+
+    /**
+     * 방금 등록한 신호의 잔여 반복을 흘려보낸다.
+     *
+     * 볼륨키는 한 번 눌러도 0.3~0.5초 간격으로 계속 들어온다. 등록은 첫 신호에서 끝나므로
+     * 나머지가 일반 경로로 새어나가 방금 등록한 동작을 그대로 실행해버린다. 토글이 켜졌다
+     * 꺼졌다 하고 그 토스트가 줄줄이 쌓여 뒤늦게 하나씩 뜬다.
+     */
+    private void startPostCaptureCooldown() {
+        inputCaptureCooldownUntilMs = SystemClock.uptimeMillis() + POST_CAPTURE_COOLDOWN_MS;
+    }
+
+    private boolean inPostCaptureCooldown(long eventTime) {
+        return eventTime < inputCaptureCooldownUntilMs;
     }
 
     private void finishInputCaptureWithMouseGesture(int direction) {
@@ -831,6 +865,7 @@ public class TouchAccessibilityService extends AccessibilityService {
             MappingStore.saveMouseGesture(this, slot, direction, signature);
         }
         MappingStore.saveInputDeviceMode(this, MappingStore.DEVICE_MODE_MOTION);
+        saveObservedAnchorRange(slot);
         if (selectedDeviceUsesTouchscreen()) {
             rebuildSelectedControllerTrapZones();
         }
@@ -844,7 +879,9 @@ public class TouchAccessibilityService extends AccessibilityService {
             hideRemoteTrapOverlay();
             showRemoteTrapOverlay();
         }
-        Toast.makeText(this, "버튼 " + (slot + 1) + " 입력 저장: 마우스 " + MappingStore.mouseDirectionLabel(direction), Toast.LENGTH_SHORT).show();
+        startPostCaptureCooldown();
+        Toast.makeText(this, "버튼 " + (slot + 1) + " 입력 저장: 마우스 "
+                + MappingStore.mouseDirectionDisplayLabel(direction), Toast.LENGTH_SHORT).show();
         hideInputCapturePanel();
         MainActivity.refreshIfVisible();
     }
@@ -1679,10 +1716,39 @@ public class TouchAccessibilityService extends AccessibilityService {
         return new RectF(left, top, Math.max(left + 1f, right), Math.max(top + 1f, bottom));
     }
 
+    /**
+     * 학습 중 관측한 DOWN 좌표의 범위를 저장한다. 트랩 존은 여기서 직접 만든다.
+     *
+     * 시그니처는 화면을 12x16으로 양자화한 값이라 좌표로 되돌리면 최대 반 칸이 어긋난다.
+     * 원본을 갖고 있는 학습 시점에 그대로 남겨두면 역산할 이유가 없다.
+     */
+    private void saveObservedAnchorRange(int slot) {
+        if (inputCaptureAnchors.isEmpty()) {
+            return;
+        }
+        float minX = Float.MAX_VALUE;
+        float minY = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE;
+        float maxY = -Float.MAX_VALUE;
+        for (float[] point : inputCaptureAnchors) {
+            minX = Math.min(minX, point[0]);
+            minY = Math.min(minY, point[1]);
+            maxX = Math.max(maxX, point[0]);
+            maxY = Math.max(maxY, point[1]);
+        }
+        MappingStore.saveObservedAnchor(this, slot, minX, minY, maxX, maxY);
+    }
+
     private void rebuildSelectedControllerTrapZones() {
         List<RectF> anchorZones = new ArrayList<>();
         for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
             MappingStore.Mapping mapping = MappingStore.get(this, slot);
+            // 관측한 좌표가 있으면 그것을 쓴다. 없는 기존 프로필만 시그니처에서 역산한다.
+            RectF observed = observedAnchorZone(slot);
+            if (observed != null) {
+                mergeAnchorZone(anchorZones, observed);
+                continue;
+            }
             if (mapping.triggerType == MappingStore.TRIGGER_MOUSE_GESTURE) {
                 addSignatureAnchorZones(anchorZones, mapping.triggerSignature);
             }
@@ -1704,6 +1770,39 @@ public class TouchAccessibilityService extends AccessibilityService {
             ));
         }
         MappingStore.saveTrapZones(this, zones);
+    }
+
+    /**
+     * 관측된 DOWN 좌표 범위에 여백을 붙인 트랩 존.
+     *
+     * 스와이프를 주입하는 컨트롤러라도 DOWN을 받은 창이 제스처 전체를 가져가므로
+     * 시작점만 덮으면 된다. 경로까지 덮을 필요가 없어 화면 점유가 작다.
+     */
+    private RectF observedAnchorZone(int slot) {
+        float[] range = MappingStore.observedAnchor(this, slot);
+        if (range == null) {
+            return null;
+        }
+        float margin = dp(24);
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        return new RectF(
+                Math.max(0f, range[0] - margin),
+                Math.max(0f, range[1] - margin),
+                Math.min(screenWidth, range[2] + margin),
+                Math.min(screenHeight, range[3] + margin));
+    }
+
+    private void mergeAnchorZone(List<RectF> zones, RectF zone) {
+        for (RectF saved : zones) {
+            if (RectF.intersects(saved, zone)) {
+                saved.union(zone);
+                return;
+            }
+        }
+        if (zones.size() < MappingStore.MAX_TRAP_ZONES) {
+            zones.add(zone);
+        }
     }
 
     private void addSignatureAnchorZones(List<RectF> zones, String signatures) {
@@ -1873,6 +1972,11 @@ public class TouchAccessibilityService extends AccessibilityService {
     private boolean handleRemoteMouseGesture(MotionEvent event) {
         if (!isAcceptedMouseEvent(event)) {
             return false;
+        }
+
+        if (inPostCaptureCooldown(event.getEventTime())) {
+            remoteGestureBurst.reset();
+            return true;
         }
         // 커서를 옮기는 이동 신호까지 볼륨키를 막으면 안 된다. LP-910은 버튼을 누를 때마다
         // 커서를 구석으로 보냈다 되돌리는 신호를 먼저 흘리는데, 그 직후에 오는 볼륨키가
@@ -2335,7 +2439,7 @@ public class TouchAccessibilityService extends AccessibilityService {
 
     private void togglePositionOverlayFromButton() {
         if (!positionsVisible && !hasAnySavedPoint()) {
-            Toast.makeText(this, NO_SAVED_POINT_MESSAGE, Toast.LENGTH_LONG).show();
+            showNoSavedPointPanel();
             return;
         }
 
@@ -2351,14 +2455,117 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
     }
 
-    /** 좌표가 저장된 버튼이 하나라도 있는지. 하나도 없으면 위치 표시를 켜도 보여줄 것이 없다. */
     private boolean hasAnySavedPoint() {
-        for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
-            if (MappingStore.get(this, slot).hasPoint()) {
-                return true;
+        return MappingStore.hasAnySavedPoint(this);
+    }
+
+    /**
+     * 트랩 존은 가상 터치 컨트롤러가 주입하는 터치를 잡으려고 화면 일부를 덮는다.
+     * 평상시 사용 중에만 필요하다. 앱 설정 화면이나 이 서비스의 패널이 떠 있는 동안
+     * 남겨두면 그 화면의 버튼을 트랩이 먹어버린다.
+     */
+    private boolean shouldShowRemoteTrap() {
+        return remoteTrapVisible && !configurationActive && !isAnyPanelOpen();
+    }
+
+    private boolean isAnyPanelOpen() {
+        return setupOverlay != null
+                || pickerOverlay != null
+                || inputCaptureOverlay != null
+                || noSavedPointOverlay != null
+                || keyDiagnosticOverlay != null
+                || motionDiagnosticOverlay != null
+                || controllerAnalyzerOverlay != null
+                || controllerDiagnosticOverlay != null
+                || adbProbeOverlay != null;
+    }
+
+    /** 트랩을 지금 상태에 맞게 올리거나 내린다. 패널을 열고 닫을 때마다 호출한다. */
+    private void refreshRemoteTrapOverlay() {
+        if (shouldShowRemoteTrap()) {
+            if (remoteTrapOverlays.isEmpty()) {
+                showRemoteTrapOverlay();
             }
+        } else if (!remoteTrapOverlays.isEmpty()) {
+            hideRemoteTrapOverlay();
         }
-        return false;
+    }
+
+    /**
+     * 저장된 좌표가 없는데 위치 표시를 켜려 할 때 띄우는 안내. 리모컨으로 눌렀을 때는
+     * 앱 화면이 없으므로 서비스가 직접 오버레이로 보여준다.
+     */
+    private void showNoSavedPointPanel() {
+        hideNoSavedPointPanel();
+        if (windowManager == null) {
+            return;
+        }
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(18), dp(16), dp(18), dp(16));
+        panel.setBackground(roundedStroke(0xF5FFFFFF, dp(10), 0xFFE0E5EC, 1));
+        panel.setElevation(dp(8));
+
+        TextView title = new TextView(this);
+        title.setText("설정된 좌표 없음");
+        title.setTextColor(0xFF1F2933);
+        title.setTextSize(16f);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, 0, 0, dp(6));
+        panel.addView(title, panelParams());
+
+        TextView message = new TextView(this);
+        message.setText("좌표가 저장된 버튼이 없습니다.\n지금 위치를 설정하시겠습니까?");
+        message.setTextColor(0xFF657282);
+        message.setTextSize(13f);
+        message.setGravity(Gravity.CENTER);
+        message.setPadding(0, 0, 0, dp(12));
+        panel.addView(message, panelParams());
+
+        Button setupButton = new Button(this);
+        setupButton.setText("위치 설정");
+        setupButton.setAllCaps(false);
+        setupButton.setTextColor(0xFF2563EB);
+        setupButton.setBackground(rounded(0xFFEAF2FF, dp(8)));
+        setupButton.setOnClickListener(view -> {
+            hideNoSavedPointPanel();
+            showSetupPanel();
+        });
+        panel.addView(setupButton, panelParams());
+
+        Button closeButton = new Button(this);
+        closeButton.setText("닫기");
+        closeButton.setAllCaps(false);
+        closeButton.setTextColor(0xFF1F2933);
+        closeButton.setBackground(roundedStroke(0xFFFFFFFF, dp(8), 0xFFE0E5EC, 1));
+        closeButton.setOnClickListener(view -> hideNoSavedPointPanel());
+        panel.addView(closeButton, panelParams());
+
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+        );
+        params.gravity = Gravity.CENTER;
+
+        noSavedPointOverlay = panel;
+        windowManager.addView(noSavedPointOverlay, params);
+        refreshRemoteTrapOverlay();
+    }
+
+    private void hideNoSavedPointPanel() {
+        if (noSavedPointOverlay == null || windowManager == null) {
+            noSavedPointOverlay = null;
+            return;
+        }
+        windowManager.removeView(noSavedPointOverlay);
+        noSavedPointOverlay = null;
+        refreshRemoteTrapOverlay();
     }
 
     private void restoreTemporaryOverlaysIfNeeded(boolean restoreLockOverlay, boolean restorePositionOverlay,
@@ -2439,6 +2646,7 @@ public class TouchAccessibilityService extends AccessibilityService {
 
         pickerOverlay = overlay;
         windowManager.addView(pickerOverlay, params);
+        refreshRemoteTrapOverlay();
     }
 
     private void showSetupPanel() {
@@ -2501,6 +2709,11 @@ public class TouchAccessibilityService extends AccessibilityService {
 
         setupOverlay = panel;
         windowManager.addView(setupOverlay, setupOverlayParams);
+        // 좌표를 잡는 동안 이미 저장된 위치가 보여야 겹치지 않게 놓을 수 있다.
+        // 설정을 마친 뒤 따로 위치 표시를 다시 켜야 하는 흐름은 번거롭다.
+        positionsVisible = true;
+        showPositionOverlay();
+        refreshRemoteTrapOverlay();
     }
 
     private void showInputCapturePanel(int slot, boolean longMode) {
@@ -2519,6 +2732,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureSampleKeyCode = KeyEvent.KEYCODE_UNKNOWN;
         inputCaptureSampleDirection = MappingStore.TRIGGER_UNKNOWN;
         inputCaptureSampleSignatures.clear();
+        inputCaptureAnchors.clear();
         inputCaptureStatus = null;
         updateMotionCapture();
 
@@ -2591,6 +2805,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureOverlay = overlay;
         windowManager.addView(inputCaptureOverlay, params);
         overlay.requestFocus();
+        refreshRemoteTrapOverlay();
     }
 
     private void showKeyDiagnosticPanel() {
@@ -2993,6 +3208,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         windowManager.removeView(setupOverlay);
         setupOverlay = null;
         setupOverlayParams = null;
+        refreshRemoteTrapOverlay();
     }
 
     private void hideInputCapturePanel() {
@@ -3010,6 +3226,7 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureSampleKeyCode = KeyEvent.KEYCODE_UNKNOWN;
         inputCaptureSampleDirection = MappingStore.TRIGGER_UNKNOWN;
         inputCaptureSampleSignatures.clear();
+        inputCaptureAnchors.clear();
         inputCaptureStatus = null;
         updateMotionCapture();
         if (inputCaptureOverlay == null || windowManager == null) {
@@ -3019,6 +3236,7 @@ public class TouchAccessibilityService extends AccessibilityService {
 
         windowManager.removeView(inputCaptureOverlay);
         inputCaptureOverlay = null;
+        refreshRemoteTrapOverlay();
     }
 
     private void hideKeyDiagnosticPanel() {
@@ -3376,6 +3594,7 @@ public class TouchAccessibilityService extends AccessibilityService {
 
         windowManager.removeView(pickerOverlay);
         pickerOverlay = null;
+        refreshRemoteTrapOverlay();
     }
 
     private void showTouchLockOverlay() {
