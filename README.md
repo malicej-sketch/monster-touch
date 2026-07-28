@@ -4,8 +4,8 @@ Android accessibility-based button mapper for external hardware keys.
 
 ## Current Version
 
-- Version name: `A-0.1.63`
-- Version code: `71`
+- Version name: `A-0.1.65`
+- Version code: `73`
 - minSdk: `26`
 - targetSdk: `36`
 

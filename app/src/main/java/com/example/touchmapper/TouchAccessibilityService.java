@@ -4,7 +4,10 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityService.GestureResultCallback;
 import android.accessibilityservice.GestureDescription;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
@@ -196,6 +199,9 @@ public class TouchAccessibilityService extends AccessibilityService {
     };
 
     private static final class MotionBurst {
+        /** 이 시간 넘게 조용하면 앞선 버스트는 끝을 못 받고 버려진 것으로 본다. */
+        private static final long STALE_BURST_MS = 600L;
+
         boolean active;
         boolean hasAnchor;
         float anchorX;
@@ -232,6 +238,15 @@ public class TouchAccessibilityService extends AccessibilityService {
                 return false;
             }
 
+            // 앞선 버스트가 끝을 못 받고 남아 있으면 새 입력이 거기에 흡수된다.
+            // 마지막 신호와 간격이 크게 벌어졌으면 새 누름으로 본다.
+            if (active && event.getEventTime() - endTime > STALE_BURST_MS) {
+                reset();
+                if (!isStartAction(event)) {
+                    return false;
+                }
+            }
+
             if (rangeX <= 0f || rangeY <= 0f) {
                 captureRange(event);
             }
@@ -264,7 +279,12 @@ public class TouchAccessibilityService extends AccessibilityService {
             endX = event.getRawX();
             endY = event.getRawY();
             endTime = event.getEventTime();
-            return action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_BUTTON_RELEASE;
+            // ACTION_CANCEL도 끝으로 본다. 화면 가장자리까지 가는 신호는 시스템이 제스처를
+            // 가로채면서 UP 대신 CANCEL을 보낸다. 그것만 기다리면 버스트가 끝나지 않아
+            // 그 버튼만 학습도 실행도 되지 않는다.
+            return action == MotionEvent.ACTION_UP
+                    || action == MotionEvent.ACTION_CANCEL
+                    || action == MotionEvent.ACTION_BUTTON_RELEASE;
         }
 
         /**
@@ -586,8 +606,30 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (inputManager != null) {
             inputManager.registerInputDeviceListener(inputDeviceListener, mainHandler);
         }
+        registerReceiver(screenOffReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF));
         refreshSelectedControllerState();
     }
+
+    /**
+     * 화면이 꺼지면 설정용 패널을 모두 닫는다.
+     *
+     * 이 창들은 접근성 오버레이라 잠금화면 위에도 그려진다. 학습 화면을 열어둔 채 화면이
+     * 꺼지면 다시 켰을 때 잠금화면 위에 그대로 떠 있게 된다.
+     */
+    private final BroadcastReceiver screenOffReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            hideInputCapturePanel();
+            hideSetupPanel();
+            hidePointPicker();
+            hideNoSavedPointPanel();
+            hideKeyDiagnosticPanel();
+            hideMotionDiagnosticPanel();
+            hideControllerAnalyzerPanel();
+            hideControllerDiagnosticPanel();
+            hideAdbProbePanel();
+        }
+    };
 
     static void refreshMotionCapture() {
         TouchAccessibilityService service = instance;
@@ -614,6 +656,11 @@ public class TouchAccessibilityService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        try {
+            unregisterReceiver(screenOffReceiver);
+        } catch (IllegalArgumentException ignored) {
+            // 등록 전에 서비스가 내려간 경우
+        }
         if (inputManager != null) {
             inputManager.unregisterInputDeviceListener(inputDeviceListener);
             inputManager = null;
@@ -2939,7 +2986,21 @@ public class TouchAccessibilityService extends AccessibilityService {
         inputCaptureStatus = null;
         updateMotionCapture();
 
-        FrameLayout overlay = new FrameLayout(this);
+        // 컨트롤러가 주입하는 터치는 안내 패널보다 먼저 가져간다.
+        //
+        // 패널은 화면 정중앙에 있고, 터치스크린형 컨트롤러는 화면 어디든 찍을 수 있다.
+        // 하필 패널 위에 떨어지면 자식 뷰가 먼저 소비해서 오버레이의 터치 리스너까지
+        // 오지 않는다. 그 버튼만 학습이 안 되고, 화면 비율이 다르면 어느 버튼이 걸리는지도
+        // 기기마다 달라진다. 손가락 터치는 그대로 흘려보내 취소 버튼이 계속 동작하게 한다.
+        FrameLayout overlay = new FrameLayout(this) {
+            @Override
+            public boolean dispatchTouchEvent(MotionEvent event) {
+                if (inputCaptureSlot >= 0 && acceptsInputDevice(event.getDevice())) {
+                    return handleInputCaptureMotionEvent(event);
+                }
+                return super.dispatchTouchEvent(event);
+            }
+        };
         overlay.setBackgroundColor(0x66000000);
         overlay.setFocusable(true);
         overlay.setFocusableInTouchMode(true);
