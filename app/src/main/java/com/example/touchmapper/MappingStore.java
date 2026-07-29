@@ -234,13 +234,21 @@ final class MappingStore {
     }
 
     /**
+     * 아래 설정들은 리모컨별로 나누지 않는다.
+     *
+     * 처음에는 다른 설정처럼 기기별 키로 저장했는데, 그러면 리모컨 선택이 풀릴 때마다
+     * 다른 키를 읽어 사용자가 끌 적 없는 설정이 꺼진 것처럼 보였다. 화면을 얼마나
+     * 진하게 할지, 더블을 쓸지는 어느 리모컨을 꼽았든 같은 취향이라 공용으로 둔다.
+     */
+
+    /**
      * 더블 클릭을 쓸지.
      *
      * 기본은 꺼짐이다. 켜는 순간 더블이 걸린 버튼은 짧게 눌러도 두 번째 입력을 기다리느라
      * 늦게 실행된다. 그 대가를 원하는 사람만 켜게 한다.
      */
     static boolean doubleClickEnabled(Context context) {
-        return prefs(context).getBoolean(devicePreferenceKey(DOUBLE_CLICK_ENABLED, context), false);
+        return prefs(context).getBoolean(DOUBLE_CLICK_ENABLED, false);
     }
 
     /**
@@ -253,20 +261,20 @@ final class MappingStore {
     static final int MIN_OVERLAY_OPACITY = 30;
 
     static int overlayOpacity(Context context) {
-        int stored = prefs(context).getInt(devicePreferenceKey(OVERLAY_OPACITY, context), 100);
+        int stored = prefs(context).getInt(OVERLAY_OPACITY, 100);
         return Math.max(MIN_OVERLAY_OPACITY, Math.min(100, stored));
     }
 
     static void saveOverlayOpacity(Context context, int opacity) {
         prefs(context).edit()
-                .putInt(devicePreferenceKey(OVERLAY_OPACITY, context),
+                .putInt(OVERLAY_OPACITY,
                         Math.max(MIN_OVERLAY_OPACITY, Math.min(100, opacity)))
                 .apply();
     }
 
     static void saveDoubleClickEnabled(Context context, boolean enabled) {
         prefs(context).edit()
-                .putBoolean(devicePreferenceKey(DOUBLE_CLICK_ENABLED, context), enabled)
+                .putBoolean(DOUBLE_CLICK_ENABLED, enabled)
                 .apply();
     }
 
@@ -289,8 +297,8 @@ final class MappingStore {
     static void saveDoubleBinding(Context context, int index, int keyCode, int action) {
         int safe = Math.max(0, Math.min(DOUBLE_BINDING_COUNT - 1, index));
         prefs(context).edit()
-                .putInt(devicePreferenceKey(DOUBLE_TRIGGER_VALUE + safe, context), keyCode)
-                .putInt(devicePreferenceKey(DOUBLE_TRIGGER_TYPE + safe, context), action)
+                .putInt(DOUBLE_TRIGGER_VALUE + safe, keyCode)
+                .putInt(DOUBLE_TRIGGER_TYPE + safe, action)
                 .apply();
     }
 
@@ -300,14 +308,12 @@ final class MappingStore {
 
     static int doubleKeyCode(Context context, int index) {
         int safe = Math.max(0, Math.min(DOUBLE_BINDING_COUNT - 1, index));
-        return prefs(context).getInt(devicePreferenceKey(DOUBLE_TRIGGER_VALUE + safe, context),
-                TRIGGER_UNKNOWN);
+        return prefs(context).getInt(DOUBLE_TRIGGER_VALUE + safe, TRIGGER_UNKNOWN);
     }
 
     static int doubleAction(Context context, int index) {
         int safe = Math.max(0, Math.min(DOUBLE_BINDING_COUNT - 1, index));
-        return prefs(context).getInt(devicePreferenceKey(DOUBLE_TRIGGER_TYPE + safe, context),
-                DOUBLE_ACTION_NONE);
+        return prefs(context).getInt(DOUBLE_TRIGGER_TYPE + safe, DOUBLE_ACTION_NONE);
     }
 
     /** 이 키에 걸린 더블 동작. 없거나 기능이 꺼져 있으면 {@link #DOUBLE_ACTION_NONE}. */
@@ -923,21 +929,21 @@ final class MappingStore {
 
     static void saveShutterPoint(Context context, float x, float y) {
         prefs(context).edit()
-                .putFloat(devicePreferenceKey(SHUTTER_X, context), x)
-                .putFloat(devicePreferenceKey(SHUTTER_Y, context), y)
+                .putFloat(SHUTTER_X, x)
+                .putFloat(SHUTTER_Y, y)
                 .apply();
     }
 
     static boolean hasShutterPoint(Context context) {
-        return prefs(context).getFloat(devicePreferenceKey(SHUTTER_X, context), -1f) >= 0f;
+        return prefs(context).getFloat(SHUTTER_X, -1f) >= 0f;
     }
 
     static float shutterX(Context context) {
-        return prefs(context).getFloat(devicePreferenceKey(SHUTTER_X, context), -1f);
+        return prefs(context).getFloat(SHUTTER_X, -1f);
     }
 
     static float shutterY(Context context) {
-        return prefs(context).getFloat(devicePreferenceKey(SHUTTER_Y, context), -1f);
+        return prefs(context).getFloat(SHUTTER_Y, -1f);
     }
 
     static void savePoint(Context context, int slot, float x, float y) {

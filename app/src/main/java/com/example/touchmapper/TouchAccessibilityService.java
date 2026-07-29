@@ -392,7 +392,13 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
         batteryVisible = !batteryVisible;
         if (batteryVisible) {
-            service.showBatteryOverlay();
+            // 설정 화면에서 켜는 것이므로 지금은 띄우지 않는다. 앱을 나가면 그때 나타난다.
+            // 우리 화면 위에 우리 계기판을 얹으면 자기 UI를 자기가 가린다.
+            if (!configurationActive) {
+                service.showBatteryOverlay();
+            } else if (BatteryWidgetProvider.hasWidgets(service)) {
+                service.startBatteryTick();
+            }
         } else {
             service.hideBatteryOverlay();
         }
@@ -401,6 +407,16 @@ public class TouchAccessibilityService extends AccessibilityService {
 
     static boolean isBatteryOverlayVisible() {
         return batteryVisible;
+    }
+
+    /** 앱 화면의 스위치에서 터치 잠금을 켜고 끈다. */
+    static boolean toggleTouchLockFromApp() {
+        TouchAccessibilityService service = instance;
+        if (service == null) {
+            return false;
+        }
+        service.toggleTouchLock();
+        return true;
     }
 
     /** 투명도를 바꾸면 떠 있는 표시에 바로 반영한다. 슬라이더를 움직이며 보게 한다. */
