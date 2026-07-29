@@ -119,6 +119,11 @@ public class MainActivity extends Activity {
         super.onResume();
         activeInstance = this;
         TouchAccessibilityService.setConfigurationActive(true);
+        // 전용 제품 빌드는 쓸 수 있는 기기가 하나뿐이고 키도 정해져 있다. 물어보지 않는다.
+        if (ControllerPolicy.autoSelect(this)) {
+            TouchAccessibilityService.refreshMotionCapture();
+        }
+        ControllerPolicy.applyDefaultBindings(this);
         renderMappings();
         batteryHandler.removeCallbacks(batteryTick);
         batteryHandler.postDelayed(batteryTick, BATTERY_REFRESH_MS);
@@ -170,6 +175,10 @@ public class MainActivity extends Activity {
             default:
                 return COLOR_MUTED;
         }
+    }
+
+    private String doubleClickLabel() {
+        return MappingStore.doubleClickEnabled(this) ? "더블 클릭 켜짐" : "더블 클릭 꺼짐";
     }
 
     private void updateBatteryCard() {
@@ -287,18 +296,21 @@ public class MainActivity extends Activity {
         resetButton.setOnClickListener(view -> confirmReset());
         utilityActions.addView(resetButton, utilityButtonParams());
 
-        inputDeviceButton = makeButton("", 0xFFFFFFFF, COLOR_TEXT);
-        inputDeviceButton.setOnClickListener(view -> showInputDevicePicker());
-        root.addView(inputDeviceButton, matchWidthParams());
+        // 전용 리모컨만 쓰는 빌드에서는 고를 것도, 설명할 분류도 없다.
+        if (ControllerPolicy.unrestricted()) {
+            inputDeviceButton = makeButton("", 0xFFFFFFFF, COLOR_TEXT);
+            inputDeviceButton.setOnClickListener(view -> showInputDevicePicker());
+            root.addView(inputDeviceButton, matchWidthParams());
 
-        inputDeviceInfoText = new TextView(this);
-        inputDeviceInfoText.setTextSize(13f);
-        inputDeviceInfoText.setTextColor(COLOR_MUTED);
-        inputDeviceInfoText.setPadding(dp(12), dp(10), dp(12), dp(10));
-        inputDeviceInfoText.setBackground(roundedStroke(COLOR_SURFACE, dp(8), COLOR_BORDER, 1));
-        LinearLayout.LayoutParams deviceInfoParams = matchWidthParams();
-        deviceInfoParams.setMargins(0, 0, 0, dp(12));
-        root.addView(inputDeviceInfoText, deviceInfoParams);
+            inputDeviceInfoText = new TextView(this);
+            inputDeviceInfoText.setTextSize(13f);
+            inputDeviceInfoText.setTextColor(COLOR_MUTED);
+            inputDeviceInfoText.setPadding(dp(12), dp(10), dp(12), dp(10));
+            inputDeviceInfoText.setBackground(roundedStroke(COLOR_SURFACE, dp(8), COLOR_BORDER, 1));
+            LinearLayout.LayoutParams deviceInfoParams = matchWidthParams();
+            deviceInfoParams.setMargins(0, 0, 0, dp(12));
+            root.addView(inputDeviceInfoText, deviceInfoParams);
+        }
 
         LinearLayout setupActions = new LinearLayout(this);
         setupActions.setOrientation(LinearLayout.HORIZONTAL);
@@ -325,6 +337,51 @@ public class MainActivity extends Activity {
             renderMappings();
         });
         root.addView(batteryOverlayButton, matchWidthParams());
+
+        // 거치대에서는 계기판이 아래 배달 앱을 가린다. 진하기를 직접 맞추게 한다.
+        TextView opacityLabel = new TextView(this);
+        opacityLabel.setTextSize(13f);
+        opacityLabel.setTextColor(COLOR_MUTED);
+        opacityLabel.setPadding(dp(4), dp(8), dp(4), 0);
+        // 이 값은 화면 위에 뜨는 오버레이에만 걸린다. 바로 위 카드는 안 변하므로
+        // 이름에서 그 차이가 드러나야 한다.
+        opacityLabel.setText("화면 위 표시 진하기 " + MappingStore.overlayOpacity(this) + "%");
+        root.addView(opacityLabel, matchWidthParams());
+
+        android.widget.SeekBar opacityBar = new android.widget.SeekBar(this);
+        opacityBar.setMax(100 - MappingStore.MIN_OVERLAY_OPACITY);
+        opacityBar.setProgress(MappingStore.overlayOpacity(this) - MappingStore.MIN_OVERLAY_OPACITY);
+        opacityBar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(android.widget.SeekBar bar, int progress, boolean fromUser) {
+                int opacity = progress + MappingStore.MIN_OVERLAY_OPACITY;
+                opacityLabel.setText("화면 위 표시 진하기 " + opacity + "%");
+                MappingStore.saveOverlayOpacity(MainActivity.this, opacity);
+                // 움직이는 동안 바로 보이게 한다.
+                TouchAccessibilityService.refreshOverlayOpacity(MainActivity.this);
+            }
+
+            @Override
+            public void onStartTrackingTouch(android.widget.SeekBar bar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(android.widget.SeekBar bar) {
+            }
+        });
+        root.addView(opacityBar, matchWidthParams());
+
+        Button doubleClickButton = makeButton("", 0xFFF1F5F9, COLOR_TEXT);
+        doubleClickButton.setOnClickListener(view -> {
+            boolean enabled = !MappingStore.doubleClickEnabled(this);
+            MappingStore.saveDoubleClickEnabled(this, enabled);
+            doubleClickButton.setText(doubleClickLabel());
+            Toast.makeText(this, enabled
+                    ? "더블 클릭 ON — 더블이 걸린 버튼은 조금 늦게 실행됩니다."
+                    : "더블 클릭 OFF", Toast.LENGTH_SHORT).show();
+        });
+        doubleClickButton.setText(doubleClickLabel());
+        root.addView(doubleClickButton, matchWidthParams());
 
         showPositionsButton = makeButton(
                 positionButtonLabel(),
@@ -515,8 +572,9 @@ public class MainActivity extends Activity {
         actions.addView(actionCell("화면 잠금", MappingStore.LOCK_SLOT), halfWidthParams(false));
         mappingsContainer.addView(actions, matchWidthParams());
 
-        mappingsContainer.addView(sectionTitle("버튼 4개", dp(8)));
-        for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
+        int buttonCount = ControllerPolicy.visibleButtonCount();
+        mappingsContainer.addView(sectionTitle("버튼 " + buttonCount + "개", dp(8)));
+        for (int slot = 0; slot < buttonCount; slot++) {
             mappingsContainer.addView(mappingRow(slot));
         }
     }
@@ -539,6 +597,80 @@ public class MainActivity extends Activity {
             params.setMargins(dp(6), 0, 0, 0);
         }
         return params;
+    }
+
+    /**
+     * 이 버튼의 길게·더블이 무엇을 하는지 줄로 적는다.
+     *
+     * 짧게는 위 줄이 이미 보여주므로 여기서는 뺀다. 배정된 것이 없으면 줄도 안 만든다 —
+     * "없음"을 늘어놓으면 있는 것이 묻힌다.
+     */
+    private String slotRoleLines(int slot, MappingStore.Mapping mapping) {
+        StringBuilder lines = new StringBuilder();
+
+        int keyCode = mapping.triggerType == MappingStore.TRIGGER_KEY
+                ? mapping.triggerValue : MappingStore.TRIGGER_UNKNOWN;
+
+        String longLabel = longRoleLabel(keyCode);
+        if (!longLabel.isEmpty()) {
+            lines.append("길게 · ").append(longLabel);
+        }
+        String doubleLabel = doubleRoleLabel(keyCode);
+        if (!doubleLabel.isEmpty()) {
+            if (lines.length() > 0) {
+                lines.append('\n');
+            }
+            lines.append("더블 · ").append(doubleLabel);
+            if (!MappingStore.doubleClickEnabled(this)) {
+                lines.append("  (꺼짐)");
+            }
+        }
+        return lines.toString();
+    }
+
+    /**
+     * 같은 키의 길게가 무엇을 하는지.
+     *
+     * 슬롯 번호로 판단하면 안 된다. 하단 버튼은 짧게가 슬롯 2인데 화면 잠금은 슬롯 3의
+     * 길게로 저장된다. 키를 기준으로 찾아야 맞다.
+     */
+    private String longRoleLabel(int keyCode) {
+        if (keyCode == MappingStore.TRIGGER_UNKNOWN) {
+            return "";
+        }
+        MappingStore.Mapping longMapping = MappingStore.findByLongKeyCode(this, keyCode);
+        if (longMapping == null) {
+            return "";
+        }
+        if (longMapping.slot == MappingStore.MARKER_TOGGLE_SLOT) {
+            return "위치 표시";
+        }
+        if (longMapping.slot == MappingStore.LOCK_SLOT) {
+            return "화면 잠금";
+        }
+        return "버튼 " + (longMapping.slot + 1) + " 탭";
+    }
+
+    private String doubleRoleLabel(int keyCode) {
+        for (int index = 0; index < MappingStore.DOUBLE_BINDING_COUNT; index++) {
+            if (MappingStore.doubleKeyCode(this, index) != keyCode
+                    || keyCode == MappingStore.TRIGGER_UNKNOWN) {
+                continue;
+            }
+            switch (MappingStore.doubleAction(this, index)) {
+                case MappingStore.DOUBLE_ACTION_BACK:
+                    return "뒤로 가기";
+                case MappingStore.DOUBLE_ACTION_HOME:
+                    return "홈";
+                case MappingStore.DOUBLE_ACTION_RECENTS:
+                    return "최근 앱";
+                case MappingStore.DOUBLE_ACTION_CAMERA:
+                    return "카메라";
+                default:
+                    return "";
+            }
+        }
+        return "";
     }
 
     private LinearLayout mappingRow(int slot) {
@@ -568,11 +700,25 @@ public class MainActivity extends Activity {
         detail.setText(MappingStore.triggerDisplayLabel(mapping) + " · " + pointLabel(mapping));
         texts.addView(detail);
 
+        // 리모컨을 든 사람이 화면만 보고 이 버튼으로 뭘 할 수 있는지 알아야 한다.
+        String roles = slotRoleLines(slot, mapping);
+        if (!roles.isEmpty()) {
+            TextView rolesView = new TextView(this);
+            rolesView.setTextSize(13f);
+            rolesView.setTextColor(COLOR_MUTED);
+            rolesView.setPadding(0, dp(6), 0, 0);
+            rolesView.setText(roles);
+            texts.addView(rolesView);
+        }
+
         row.addView(texts, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        Button captureButton = makeSmallButton("키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
-        captureButton.setOnClickListener(view -> startInputCapture(slot, false));
-        row.addView(captureButton, rowButtonParams());
+        // 키가 미리 정해진 빌드에서는 배울 것이 없다.
+        if (ControllerPolicy.unrestricted()) {
+            Button captureButton = makeSmallButton("키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
+            captureButton.setOnClickListener(view -> startInputCapture(slot, false));
+            row.addView(captureButton, rowButtonParams());
+        }
 
         Button nameButton = makeSmallButton("이름 변경", 0xFFF1F5F9, COLOR_TEXT);
         nameButton.setOnClickListener(view -> showButtonNameEditor(slot));
@@ -625,10 +771,12 @@ public class MainActivity extends Activity {
         detail.setText(MappingStore.longTriggerDisplayLabel(mapping));
         cell.addView(detail);
 
-        Button captureButton = makeSmallButton("키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
-        captureButton.setOnClickListener(view -> startInputCapture(slot, true));
-        cell.addView(captureButton, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        if (ControllerPolicy.unrestricted()) {
+            Button captureButton = makeSmallButton("키 입력", 0xFFEAF2FF, COLOR_PRIMARY);
+            captureButton.setOnClickListener(view -> startInputCapture(slot, true));
+            cell.addView(captureButton, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        }
 
         return cell;
     }
@@ -857,6 +1005,10 @@ public class MainActivity extends Activity {
 
     private boolean isUsableInputDevice(InputDevice device) {
         if (device.isVirtual()) {
+            return false;
+        }
+        // 전용 제품 빌드는 우리 리모컨만 목록에 올린다.
+        if (!ControllerPolicy.isAllowed(device)) {
             return false;
         }
 

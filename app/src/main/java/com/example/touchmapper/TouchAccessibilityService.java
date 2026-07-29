@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityService.GestureResultCallback;
 import android.accessibilityservice.GestureDescription;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.app.KeyguardManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -54,6 +55,14 @@ public class TouchAccessibilityService extends AccessibilityService {
     private static final long VOLUME_KEY_BURST_GAP_MS = 1000L;
     private static final long HOLD_PHASE_MS = 5000L;
     private static final long ACTION_HOLD_MS = 1500L;
+    /**
+     * 두 번째 클릭을 기다리는 시간.
+     *
+     * 장갑을 낀 손은 맨손보다 두 번 누르는 간격이 길고 고르지 않다. 짧게 잡으면 더블이
+     * 안 걸리고, 길게 잡으면 그 버튼의 짧게 누름이 그만큼 늦어진다. 그 대가 때문에
+     * 더블은 기본으로 꺼져 있다.
+     */
+    private static final long DOUBLE_CLICK_WINDOW_MS = 300L;
     private static final long BATTERY_REFRESH_MS = 3000L;
     private static final long POST_CAPTURE_COOLDOWN_MS = 900L;
     private static final long INPUT_CAPTURE_KEY_GRACE_MS = 750L;
@@ -170,14 +179,18 @@ public class TouchAccessibilityService extends AccessibilityService {
     private View batteryOverlay;
     private TextView batteryOverlayText;
     private static boolean batteryVisible;
+    /** 오버레이와 홈 화면 위젯이 같은 주기로 값을 받는다. 둘 다 없으면 스스로 멈춘다. */
     private final Runnable batteryTickRunnable = new Runnable() {
         @Override
         public void run() {
-            if (batteryOverlayText == null) {
-                return;
+            if (batteryOverlayText != null) {
+                updateBatteryOverlayText();
             }
-            updateBatteryOverlayText();
-            mainHandler.postDelayed(this, BATTERY_REFRESH_MS);
+            BatteryWidgetProvider.refresh(TouchAccessibilityService.this);
+            if (batteryOverlayText != null
+                    || BatteryWidgetProvider.hasWidgets(TouchAccessibilityService.this)) {
+                mainHandler.postDelayed(this, BATTERY_REFRESH_MS);
+            }
         }
     };
     private long inputCaptureCooldownUntilMs;
@@ -388,6 +401,24 @@ public class TouchAccessibilityService extends AccessibilityService {
 
     static boolean isBatteryOverlayVisible() {
         return batteryVisible;
+    }
+
+    /** 투명도를 바꾸면 떠 있는 표시에 바로 반영한다. 슬라이더를 움직이며 보게 한다. */
+    static void refreshOverlayOpacity(Context context) {
+        TouchAccessibilityService service = instance;
+        if (service == null) {
+            return;
+        }
+        float alpha = MappingStore.overlayOpacity(context) / 100f;
+        if (service.batteryOverlayText != null) {
+            service.batteryOverlayText.setAlpha(alpha);
+        }
+        if (service.touchLockOverlay instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) service.touchLockOverlay;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                group.getChildAt(i).setAlpha(alpha);
+            }
+        }
     }
 
     static boolean arePositionsVisible() {
@@ -644,30 +675,64 @@ public class TouchAccessibilityService extends AccessibilityService {
         if (inputManager != null) {
             inputManager.registerInputDeviceListener(inputDeviceListener, mainHandler);
         }
-        registerReceiver(screenOffReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF));
+        IntentFilter screenFilter = new IntentFilter();
+        screenFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        screenFilter.addAction(Intent.ACTION_SCREEN_ON);
+        screenFilter.addAction(Intent.ACTION_USER_PRESENT);
+        registerReceiver(screenStateReceiver, screenFilter);
         refreshSelectedControllerState();
     }
 
     /**
-     * 화면이 꺼지면 설정용 패널을 모두 닫는다.
+     * 화면이 꺼지면 떠 있는 창을 모두 내리고, 잠금이 풀리면 되살린다.
      *
-     * 이 창들은 접근성 오버레이라 잠금화면 위에도 그려진다. 학습 화면을 열어둔 채 화면이
-     * 꺼지면 다시 켰을 때 잠금화면 위에 그대로 떠 있게 된다.
+     * 이 창들은 접근성 오버레이라 잠금화면 위에도 그려진다. 잠금화면에 계기판이 떠 있을
+     * 이유가 없고, 3초마다 도는 갱신도 그동안은 낭비다. 설정용 패널은 아예 닫고, 계기판과
+     * 위치 표시는 켜둔 상태만 기억해 뒀다가 잠금이 풀린 뒤에 다시 띄운다.
      */
-    private final BroadcastReceiver screenOffReceiver = new BroadcastReceiver() {
+    private final BroadcastReceiver screenStateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            hideInputCapturePanel();
-            hideSetupPanel();
-            hidePointPicker();
-            hideNoSavedPointPanel();
-            hideKeyDiagnosticPanel();
-            hideMotionDiagnosticPanel();
-            hideControllerAnalyzerPanel();
-            hideControllerDiagnosticPanel();
-            hideAdbProbePanel();
+            if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
+                hideInputCapturePanel();
+                hideSetupPanel();
+                hidePointPicker();
+                hideNoSavedPointPanel();
+                hideKeyDiagnosticPanel();
+                hideMotionDiagnosticPanel();
+                hideControllerAnalyzerPanel();
+                hideControllerDiagnosticPanel();
+                hideAdbProbePanel();
+                hideBatteryOverlay();
+                hidePositionOverlay();
+                // 화면이 꺼져 있으면 위젯도 보이지 않는다. 갱신을 돌릴 이유가 없다.
+                mainHandler.removeCallbacks(batteryTickRunnable);
+                return;
+            }
+            // 화면이 켜졌거나 잠금이 풀렸다. 잠금이 남아 있으면 아직 띄우지 않는다.
+            restoreOverlaysIfUnlocked();
         }
     };
+
+    private boolean isKeyguardLocked() {
+        KeyguardManager keyguard = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        return keyguard != null && keyguard.isKeyguardLocked();
+    }
+
+    /** 켜둔 상태였던 창만 되살린다. 설정 화면이 열려 있으면 그쪽 규칙을 따른다. */
+    private void restoreOverlaysIfUnlocked() {
+        if (configurationActive || isKeyguardLocked()) {
+            return;
+        }
+        if (batteryVisible) {
+            showBatteryOverlay();
+        } else if (BatteryWidgetProvider.hasWidgets(this)) {
+            startBatteryTick();
+        }
+        if (positionsVisible) {
+            showPositionOverlay();
+        }
+    }
 
     static void refreshMotionCapture() {
         TouchAccessibilityService service = instance;
@@ -695,7 +760,7 @@ public class TouchAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         try {
-            unregisterReceiver(screenOffReceiver);
+            unregisterReceiver(screenStateReceiver);
         } catch (IllegalArgumentException ignored) {
             // 등록 전에 서비스가 내려간 경우
         }
@@ -799,7 +864,48 @@ public class TouchAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event == null
+                || event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                || event.getPackageName() == null) {
+            return;
+        }
+        String pkg = event.getPackageName().toString();
+
+        // 우리 오버레이도 창 전환으로 잡힌다. 이걸 앞 앱으로 세면 카메라를 켜둔 채로도
+        // 카메라가 아닌 것으로 판단해버린다. 처음에 그래서 셔터가 아니라 카메라가 다시
+        // 켜졌다.
+        if (pkg.equals(getPackageName())) {
+            return;
+        }
+        foregroundPackage = pkg;
+
+        // 카메라를 벗어나면 그때 촬영 모드를 푼다. 카메라 안에서 미리보기 같은 다른
+        // 창이 떠도 같은 패키지라 유지된다.
+        if (cameraMode && !pkg.equals(cameraPackage())) {
+            cameraMode = false;
+        }
     }
+
+    private String foregroundPackage = "";
+    private String cameraPackage;
+    /** 우리가 카메라를 띄운 뒤로 계속 촬영 모드다. 카메라를 벗어날 때까지 유지된다. */
+    private boolean cameraMode;
+
+    /** 기본 카메라 앱의 패키지. 기기마다 다르므로 인텐트를 풀어서 알아낸다. */
+    private String cameraPackage() {
+        if (cameraPackage != null) {
+            return cameraPackage;
+        }
+        cameraPackage = "";
+        Intent intent = new Intent(android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
+        android.content.pm.ResolveInfo info =
+                getPackageManager().resolveActivity(intent, 0);
+        if (info != null && info.activityInfo != null) {
+            cameraPackage = info.activityInfo.packageName;
+        }
+        return cameraPackage;
+    }
+
 
     @Override
     public void onMotionEvent(MotionEvent event) {
@@ -854,7 +960,13 @@ public class TouchAccessibilityService extends AccessibilityService {
             heldLongSlot = -1;
 
             if (!longClickTriggered) {
-                executeSlot(releasedSlot);
+                int doubleAction = MappingStore.findDoubleAction(this, event.getKeyCode());
+                if (doubleAction == MappingStore.DOUBLE_ACTION_NONE) {
+                    // 이 키에 더블이 없다. 기다릴 이유가 없으니 즉시 실행한다.
+                    executeSlot(releasedSlot);
+                } else {
+                    handleDoubleCandidate(event.getKeyCode(), releasedSlot, doubleAction);
+                }
             }
             longClickTriggered = false;
             return true;
@@ -870,6 +982,89 @@ public class TouchAccessibilityService extends AccessibilityService {
      * 기존 암묵 동작(위치 표시 / 화면 잠금)을 유지한다. 키만 내보내는 HID 컨트롤러는
      * 남는 신호가 없어 이 암묵 경로에 의존한다.
      */
+    private int pendingSingleSlot = -1;
+    private int pendingDoubleKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+
+    /** 창이 지나도록 두 번째가 안 왔다. 단독 클릭이었다. */
+    private final Runnable pendingSingleRunnable = new Runnable() {
+        @Override
+        public void run() {
+            int slot = pendingSingleSlot;
+            pendingSingleSlot = -1;
+            pendingDoubleKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+            if (slot >= 0) {
+                executeSlot(slot);
+            }
+        }
+    };
+
+    /**
+     * 더블이 걸린 키를 뗐다. 단독인지 더블의 앞부분인지 지금은 알 수 없다.
+     *
+     * 떼는 즉시 단독 동작을 실행해버리면 더블을 의도한 사용자에게 두 동작이 다 걸린다.
+     * 그래서 창이 지날 때까지 미룬다. 이 지연은 더블이 걸린 버튼만 진다.
+     */
+    private void handleDoubleCandidate(int keyCode, int singleSlot, int doubleAction) {
+        if (pendingDoubleKeyCode == keyCode) {
+            mainHandler.removeCallbacks(pendingSingleRunnable);
+            pendingSingleSlot = -1;
+            pendingDoubleKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+            executeDoubleAction(doubleAction);
+            return;
+        }
+        mainHandler.removeCallbacks(pendingSingleRunnable);
+        pendingSingleSlot = singleSlot;
+        pendingDoubleKeyCode = keyCode;
+        mainHandler.postDelayed(pendingSingleRunnable, DOUBLE_CLICK_WINDOW_MS);
+    }
+
+    /**
+     * 더블에 걸린 동작을 실행한다.
+     *
+     * 슬롯 번호면 저장된 좌표를 탭하고, 100번대면 좌표와 무관한 동작이다.
+     */
+    private void executeDoubleAction(int action) {
+        if (action >= 0 && action < MappingStore.SLOT_COUNT) {
+            executeSlot(action);
+            return;
+        }
+        switch (action) {
+            case MappingStore.DOUBLE_ACTION_BACK:
+                // 제스처 내비게이션에서는 뒤로 가기 버튼이 화면에 없다. 좌표로는 못 한다.
+                performGlobalAction(GLOBAL_ACTION_BACK);
+                break;
+            case MappingStore.DOUBLE_ACTION_HOME:
+                performGlobalAction(GLOBAL_ACTION_HOME);
+                break;
+            case MappingStore.DOUBLE_ACTION_RECENTS:
+                performGlobalAction(GLOBAL_ACTION_RECENTS);
+                break;
+            case MappingStore.DOUBLE_ACTION_CAMERA:
+                // 카메라를 켠 뒤로는 같은 버튼이 셔터로만 동작한다.
+                if (cameraMode && MappingStore.hasShutterPoint(this)) {
+                    tap(MappingStore.shutterX(this), MappingStore.shutterY(this));
+                } else {
+                    launchCamera();
+                    cameraMode = true;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** 기본 카메라를 띄운다. 배달 완료 사진을 찍으려면 우선 카메라가 떠야 한다. */
+    private void launchCamera() {
+        Intent intent = new Intent(android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(intent);
+        } catch (Exception e) {
+            // 카메라 앱이 없거나 백그라운드 실행이 막힌 기기다. 조용히 넘긴다.
+            android.util.Log.w("TouchMapper", "카메라 실행 실패: " + e.getMessage());
+        }
+    }
+
     /** 누르고 있는 동안 시간을 재서 발동시킨다. 1.5초 전에 떼면 아무 일도 없다. */
     private void handleHoldAction(KeyEvent event, int slot) {
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
@@ -2873,12 +3068,12 @@ public class TouchAccessibilityService extends AccessibilityService {
         params.x = dp(10);
         params.y = dp(10);
 
+        text.setAlpha(MappingStore.overlayOpacity(this) / 100f);
         batteryOverlayText = text;
         batteryOverlay = text;
         windowManager.addView(batteryOverlay, params);
         updateBatteryOverlayText();
-        mainHandler.removeCallbacks(batteryTickRunnable);
-        mainHandler.postDelayed(batteryTickRunnable, BATTERY_REFRESH_MS);
+        startBatteryTick();
     }
 
     /** 어두운 배경 위에 올라가므로 메인 화면보다 밝은 색을 쓴다. */
@@ -2938,9 +3133,17 @@ public class TouchAccessibilityService extends AccessibilityService {
         batteryOverlayText.setText(line);
     }
 
-    private void hideBatteryOverlay() {
+    private void startBatteryTick() {
         mainHandler.removeCallbacks(batteryTickRunnable);
+        mainHandler.post(batteryTickRunnable);
+    }
+
+    private void hideBatteryOverlay() {
         batteryOverlayText = null;
+        // 위젯이 남아 있으면 갱신은 계속 돌아야 한다.
+        if (!BatteryWidgetProvider.hasWidgets(this)) {
+            mainHandler.removeCallbacks(batteryTickRunnable);
+        }
         if (batteryOverlay == null || windowManager == null) {
             batteryOverlay = null;
             return;
@@ -2988,16 +3191,24 @@ public class TouchAccessibilityService extends AccessibilityService {
         }
     }
 
+    /** 버튼 슬롯이 아니라 카메라 셔터 위치를 잡는다는 표시. */
+    private static final int SHUTTER_SLOT = -2;
+
     private void showPointPicker(int slot) {
         hidePointPicker();
         hideSetupPanel();
-        int targetSlot = Math.max(0, Math.min(MappingStore.SLOT_COUNT - 1, slot));
+        boolean shutter = slot == SHUTTER_SLOT;
+        int targetSlot = shutter ? SHUTTER_SLOT
+                : Math.max(0, Math.min(MappingStore.SLOT_COUNT - 1, slot));
 
         FrameLayout overlay = new FrameLayout(this);
         overlay.setBackgroundColor(0x77000000);
 
         TextView label = new TextView(this);
-        label.setText("저장할 위치를 누르세요\n버튼 " + (targetSlot + 1) + " · " + MappingStore.buttonName(this, targetSlot));
+        label.setText(shutter
+                ? "카메라를 켜고 셔터 버튼 위치를 누르세요"
+                : "저장할 위치를 누르세요\n버튼 " + (targetSlot + 1) + " · "
+                        + MappingStore.buttonName(this, targetSlot));
         label.setTextColor(0xFFFFFFFF);
         label.setTextSize(20f);
         label.setGravity(Gravity.CENTER);
@@ -3016,8 +3227,13 @@ public class TouchAccessibilityService extends AccessibilityService {
                 return true;
             }
 
-            MappingStore.savePoint(this, targetSlot, event.getRawX(), event.getRawY());
-            Toast.makeText(this, "버튼 " + (targetSlot + 1) + " 위치 저장 완료", Toast.LENGTH_SHORT).show();
+            if (shutter) {
+                MappingStore.saveShutterPoint(this, event.getRawX(), event.getRawY());
+                Toast.makeText(this, "카메라 셔터 위치 저장 완료", Toast.LENGTH_SHORT).show();
+            } else {
+                MappingStore.savePoint(this, targetSlot, event.getRawX(), event.getRawY());
+                Toast.makeText(this, "버튼 " + (targetSlot + 1) + " 위치 저장 완료", Toast.LENGTH_SHORT).show();
+            }
             hidePointPicker();
             if (positionsVisible) {
                 showPositionOverlay();
@@ -3068,7 +3284,19 @@ public class TouchAccessibilityService extends AccessibilityService {
         help.setOnTouchListener(new DragMoveListener());
         panel.addView(help, panelParams());
 
-        for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
+        // 카메라 셔터는 배달 앱 프로필과 무관하게 하나만 잡는다.
+        if (MappingStore.doubleClickEnabled(this)) {
+            Button shutterButton = new Button(this);
+            shutterButton.setAllCaps(false);
+            shutterButton.setText(MappingStore.hasShutterPoint(this)
+                    ? "카메라 셔터 위치 · 저장됨"
+                    : "카메라 셔터 위치 · 없음");
+            shutterButton.setOnClickListener(view -> showPointPicker(SHUTTER_SLOT));
+            panel.addView(shutterButton, panelParams());
+        }
+
+        // 전용 리모컨은 버튼이 셋이다. 넷째를 내놓아봐야 누를 방법이 없다.
+        for (int slot = 0; slot < ControllerPolicy.visibleButtonCount(); slot++) {
             final int targetSlot = slot;
             Button button = new Button(this);
             button.setText("버튼 " + (slot + 1) + " · " + MappingStore.buttonName(this, slot));
@@ -3833,7 +4061,7 @@ public class TouchAccessibilityService extends AccessibilityService {
     private void showPositionOverlay() {
         hidePositionOverlay();
 
-        for (int slot = 0; slot < MappingStore.SLOT_COUNT; slot++) {
+        for (int slot = 0; slot < ControllerPolicy.visibleButtonCount(); slot++) {
             MappingStore.Mapping mapping = MappingStore.get(this, slot);
             if (!mapping.hasPoint()) {
                 continue;
@@ -4032,13 +4260,15 @@ public class TouchAccessibilityService extends AccessibilityService {
         label.setPadding(dp(14), dp(8), dp(14), dp(8));
         label.setBackground(rounded(0x88000000, dp(8)));
 
+        // 배터리 표시가 우상단을 쓴다. 겹치지 않게 이쪽은 좌상단에 붙인다.
         FrameLayout.LayoutParams labelParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP | Gravity.END
+                Gravity.TOP | Gravity.START
         );
-        labelParams.setMargins(0, 36, 24, 0);
+        labelParams.setMargins(dp(12), dp(10), 0, 0);
         overlay.addView(label, labelParams);
+        label.setAlpha(MappingStore.overlayOpacity(this) / 100f);
 
         overlay.setOnTouchListener((view, event) -> {
             handleRemoteMouseGesture(event);

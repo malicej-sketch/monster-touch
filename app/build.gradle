@@ -29,6 +29,11 @@ android {
             dimension "branding"
             applicationId "com.example.touchmapper"
             buildConfigField "boolean", "SHOW_BRANDING", "true"
+            // 전용 리모컨만 동작한다. "vid:pid"를 16진수로, 여러 개면 쉼표로 나열한다.
+            // 2차 생산에서 PID가 바뀌면 지우지 말고 여기에 덧붙인다. 앞서 나간 물건이
+            // 죽으면 안 된다.
+            buildConfigField "String", "ALLOWED_CONTROLLERS", "\"303a:9e01\""
+            buildConfigField "String", "REQUIRED_CONTROLLER_NAME", "\"MON_TOUCH_RING\""
             manifestPlaceholders = [
                     appIcon     : "@mipmap/ic_launcher",
                     appRoundIcon: "@mipmap/ic_launcher_round"
@@ -39,6 +44,9 @@ android {
             dimension "branding"
             applicationId "com.example.touchmapper.plain"
             buildConfigField "boolean", "SHOW_BRANDING", "false"
+            // 비어 있으면 제한 없음. 개발과 범용 배포용이다.
+            buildConfigField "String", "ALLOWED_CONTROLLERS", "\"\""
+            buildConfigField "String", "REQUIRED_CONTROLLER_NAME", "\"\""
             manifestPlaceholders = [
                     appIcon     : "@drawable/ic_plain_launcher",
                     appRoundIcon: "@drawable/ic_plain_launcher"

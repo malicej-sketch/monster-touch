@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 배경화면 위에 올라가므로 어떤 벽지에서도 글자가 보이도록 어둡게 깐다. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#D9101418" />
+    <corners android:radius="12dp" />
+</shape>

@@ -46,6 +46,10 @@ final class MappingStore {
     private static final String LONG_TRIGGER_TYPE = "long_trigger_type_";
     private static final String LONG_TRIGGER_VALUE = "long_trigger_value_";
     private static final String LONG_TRIGGER_SIGNATURE = "long_trigger_signature_";
+    private static final String DOUBLE_TRIGGER_TYPE = "double_trigger_type_";
+    private static final String DOUBLE_TRIGGER_VALUE = "double_trigger_value_";
+    private static final String DOUBLE_CLICK_ENABLED = "double_click_enabled";
+    private static final String OVERLAY_OPACITY = "overlay_opacity";
     private static final String INPUT_DEVICE_DESCRIPTOR = "input_device_descriptor";
     private static final String INPUT_DEVICE_NAME = "input_device_name";
     private static final String INPUT_DEVICE_VENDOR_ID = "input_device_vendor_id";
@@ -227,6 +231,96 @@ final class MappingStore {
                 .putInt(inputProfileKey(LONG_TRIGGER_VALUE, context, safeSlot), keyCode)
                 .putString(inputProfileKey(LONG_TRIGGER_SIGNATURE, context, safeSlot), cleanName(signature, ""))
                 .apply();
+    }
+
+    /**
+     * 더블 클릭을 쓸지.
+     *
+     * 기본은 꺼짐이다. 켜는 순간 더블이 걸린 버튼은 짧게 눌러도 두 번째 입력을 기다리느라
+     * 늦게 실행된다. 그 대가를 원하는 사람만 켜게 한다.
+     */
+    static boolean doubleClickEnabled(Context context) {
+        return prefs(context).getBoolean(devicePreferenceKey(DOUBLE_CLICK_ENABLED, context), false);
+    }
+
+    /**
+     * 화면 위에 떠 있는 표시의 진하기. 30~100.
+     *
+     * 거치대에서는 계기판이 아래 배달 앱을 가린다. 사람마다, 화면 밝기마다 적당한
+     * 정도가 달라서 조절할 수 있게 둔다. 너무 흐리면 주행 중에 안 읽히므로 30 아래로는
+     * 내리지 않는다.
+     */
+    static final int MIN_OVERLAY_OPACITY = 30;
+
+    static int overlayOpacity(Context context) {
+        int stored = prefs(context).getInt(devicePreferenceKey(OVERLAY_OPACITY, context), 100);
+        return Math.max(MIN_OVERLAY_OPACITY, Math.min(100, stored));
+    }
+
+    static void saveOverlayOpacity(Context context, int opacity) {
+        prefs(context).edit()
+                .putInt(devicePreferenceKey(OVERLAY_OPACITY, context),
+                        Math.max(MIN_OVERLAY_OPACITY, Math.min(100, opacity)))
+                .apply();
+    }
+
+    static void saveDoubleClickEnabled(Context context, boolean enabled) {
+        prefs(context).edit()
+                .putBoolean(devicePreferenceKey(DOUBLE_CLICK_ENABLED, context), enabled)
+                .apply();
+    }
+
+    /**
+     * 더블은 슬롯에 매이지 않는다.
+     *
+     * 짧게와 길게는 "어느 버튼을 탭할지"라서 슬롯으로 충분했다. 더블은 뒤로 가기나
+     * 카메라처럼 좌표와 무관한 동작도 걸 수 있어야 해서 동작 코드를 따로 들고 다닌다.
+     *
+     * 0 이상 {@link #SLOT_COUNT} 미만이면 그 슬롯을 탭한다는 뜻이고, 100번대는 화면
+     * 좌표와 상관없는 동작이다.
+     */
+    static final int DOUBLE_BINDING_COUNT = 3;
+    static final int DOUBLE_ACTION_NONE = -1;
+    static final int DOUBLE_ACTION_BACK = 100;
+    static final int DOUBLE_ACTION_HOME = 101;
+    static final int DOUBLE_ACTION_RECENTS = 102;
+    static final int DOUBLE_ACTION_CAMERA = 103;
+
+    static void saveDoubleBinding(Context context, int index, int keyCode, int action) {
+        int safe = Math.max(0, Math.min(DOUBLE_BINDING_COUNT - 1, index));
+        prefs(context).edit()
+                .putInt(devicePreferenceKey(DOUBLE_TRIGGER_VALUE + safe, context), keyCode)
+                .putInt(devicePreferenceKey(DOUBLE_TRIGGER_TYPE + safe, context), action)
+                .apply();
+    }
+
+    static void clearDoubleBinding(Context context, int index) {
+        saveDoubleBinding(context, index, TRIGGER_UNKNOWN, DOUBLE_ACTION_NONE);
+    }
+
+    static int doubleKeyCode(Context context, int index) {
+        int safe = Math.max(0, Math.min(DOUBLE_BINDING_COUNT - 1, index));
+        return prefs(context).getInt(devicePreferenceKey(DOUBLE_TRIGGER_VALUE + safe, context),
+                TRIGGER_UNKNOWN);
+    }
+
+    static int doubleAction(Context context, int index) {
+        int safe = Math.max(0, Math.min(DOUBLE_BINDING_COUNT - 1, index));
+        return prefs(context).getInt(devicePreferenceKey(DOUBLE_TRIGGER_TYPE + safe, context),
+                DOUBLE_ACTION_NONE);
+    }
+
+    /** 이 키에 걸린 더블 동작. 없거나 기능이 꺼져 있으면 {@link #DOUBLE_ACTION_NONE}. */
+    static int findDoubleAction(Context context, int keyCode) {
+        if (!doubleClickEnabled(context) || keyCode == TRIGGER_UNKNOWN) {
+            return DOUBLE_ACTION_NONE;
+        }
+        for (int index = 0; index < DOUBLE_BINDING_COUNT; index++) {
+            if (doubleKeyCode(context, index) == keyCode) {
+                return doubleAction(context, index);
+            }
+        }
+        return DOUBLE_ACTION_NONE;
     }
 
     static Mapping findByMouseGesture(Context context, int direction) {
@@ -709,6 +803,11 @@ final class MappingStore {
     }
 
     static boolean acceptsInputDevice(Context context, String descriptor, String name, int vendorId, int productId) {
+        // 전용 제품 빌드는 목록에 없는 기기의 입력을 아예 받지 않는다. 예전에 저장해 둔
+        // 선택이 남아 있어도 마찬가지다.
+        if (!ControllerPolicy.isAllowed(vendorId, productId)) {
+            return false;
+        }
         String selectedDescriptor = selectedInputDeviceDescriptor(context);
         if (selectedDescriptor.isEmpty()) {
             return false;
@@ -811,6 +910,34 @@ final class MappingStore {
             ));
         }
         return zones;
+    }
+
+    /**
+     * 카메라 셔터 위치.
+     *
+     * 배달 앱 프로필과 무관하게 하나만 둔다. 카메라는 어느 배달 앱을 쓰든 같은 앱이고
+     * 셔터 위치도 같기 때문이다. 기기가 바뀌면 다시 잡아야 하므로 기기별로는 나눈다.
+     */
+    private static final String SHUTTER_X = "shutter_x";
+    private static final String SHUTTER_Y = "shutter_y";
+
+    static void saveShutterPoint(Context context, float x, float y) {
+        prefs(context).edit()
+                .putFloat(devicePreferenceKey(SHUTTER_X, context), x)
+                .putFloat(devicePreferenceKey(SHUTTER_Y, context), y)
+                .apply();
+    }
+
+    static boolean hasShutterPoint(Context context) {
+        return prefs(context).getFloat(devicePreferenceKey(SHUTTER_X, context), -1f) >= 0f;
+    }
+
+    static float shutterX(Context context) {
+        return prefs(context).getFloat(devicePreferenceKey(SHUTTER_X, context), -1f);
+    }
+
+    static float shutterY(Context context) {
+        return prefs(context).getFloat(devicePreferenceKey(SHUTTER_Y, context), -1f);
     }
 
     static void savePoint(Context context, int slot, float x, float y) {

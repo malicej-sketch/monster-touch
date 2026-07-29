@@ -79,6 +79,32 @@ Both variants should be built whenever the version is updated.
 - A charger that is connected but has stopped charging (battery protection limit or heat)
   is shown as connected, not as absent.
 
+## Dedicated Controller
+
+The `monster` flavor only accepts the MON_TOUCH_RING remote, listed in `build.gradle` as
+`ALLOWED_CONTROLLERS`. That build hides the device picker, the source-classification card,
+and every key-learning button, because the keys are known in advance. The `plain` flavor
+stays open to any controller.
+
+This is a product-bundling measure, not security: VID/PID are numbers in the HID
+descriptor, so a device flashed with the same pair passes.
+
+Remote firmware lives in `firmware/mon-touch-ring` (ESP32-C3, BLE HID keyboard). It is
+paired with the app through its VID/PID and keycodes, so the two must change together.
+
+| Position | Pin | Android key | Short | Long | Double |
+|---|---|---|---|---|---|
+| Top | GP3 | F5 | Button 1 | Show positions | Back |
+| Middle | GP4 | F6 | Button 2 | reserved for pairing | — |
+| Bottom | GP5 | F7 | Button 3 | Touch lock | Camera |
+
+Holding the middle button for five seconds clears the remote's bonds and re-advertises, so
+nothing may be bound to its long press.
+
+Double click is off by default. Enabling it delays the short press of any button that
+carries a double binding, because a single press cannot be told from the first half of a
+double until the window passes.
+
 ## Build
 
 ```powershell

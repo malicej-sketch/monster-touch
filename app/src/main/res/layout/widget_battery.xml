@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    1x1 칸에 세 줄을 넣는다. 위에서부터 전류, 충전 여부, 온도.
+
+    실사용 영역이 40dp 남짓이라 글자를 키울 수 없다. 그래서 단위는 빼고 숫자만
+    남기고, 상태는 색으로 말하게 한다. 전류가 맨 위이자 가장 큰 값이다.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="4dp"
+    android:background="@drawable/widget_background">
+
+    <TextView
+        android:id="@+id/widget_current"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:maxLines="1"
+        android:textColor="#FFFFFFFF"
+        android:text="—" />
+
+    <TextView
+        android:id="@+id/widget_state"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textSize="9sp"
+        android:maxLines="1"
+        android:textColor="#FFB9C2CC"
+        android:text="—" />
+
+    <TextView
+        android:id="@+id/widget_temp"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textSize="10sp"
+        android:maxLines="1"
+        android:textColor="#FFB9C2CC"
+        android:text="—" />
+</LinearLayout>
