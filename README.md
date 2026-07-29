@@ -4,8 +4,8 @@ Android accessibility-based button mapper for external hardware keys.
 
 ## Current Version
 
-- Version name: `A-0.1.66`
-- Version code: `74`
+- Version name: `A-0.1.67`
+- Version code: `75`
 - minSdk: `26`
 - targetSdk: `36`
 
@@ -61,6 +61,23 @@ Both variants should be built whenever the version is updated.
 - Saved position markers can be shown on screen.
 - A position marker can be held for 1 second to enter move mode, with vibration feedback.
 - Position markers are hidden while the app's own settings screen is open.
+- Power source, charging speed, and battery temperature are shown as three separate cells
+  on the main screen and in a floating overlay, each colored by its own state. The power
+  source reads wireless, wired, or discharging; every cable type shares one label because
+  they share the same speed boundaries.
+  The main screen refreshes every 2 seconds while visible; the overlay every 3 seconds.
+- Charging current is read as microamps per the Android spec. A device is treated as
+  reporting milliamps only when it is charging yet reports an implausibly small value.
+  The sign is never forced to match the plug state, so a phone that drains while mounted
+  on a charger reports that honestly.
+- Current is presented as charging speed in four tiers — slow, normal, fast, super fast —
+  plus discharging for any negative value. The cell's caption carries the speed word and
+  its color the tier.
+- Wired and wireless use different tier boundaries because wireless loses up to 30% in
+  transfer. Wired splits at 500 / 1,500 / 3,500 mA, wireless at 300 / 900 / 2,000 mA,
+  measured at the battery terminal.
+- A charger that is connected but has stopped charging (battery protection limit or heat)
+  is shown as connected, not as absent.
 
 ## Build
 

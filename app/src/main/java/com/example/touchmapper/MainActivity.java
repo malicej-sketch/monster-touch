@@ -34,6 +34,10 @@ public class MainActivity extends Activity {
     private static final int COLOR_PRIMARY = 0xFF2563EB;
     private static final int COLOR_PRIMARY_SOFT = 0xFFEAF2FF;
     private static final int COLOR_BORDER = 0xFFE0E5EC;
+    /** 배터리 상태를 색으로 알린다. 주행 중에는 숫자보다 색이 먼저 읽힌다. */
+    private static final int COLOR_OK = 0xFF0F7B3F;
+    private static final int COLOR_WARN = 0xFFB45309;
+    private static final int COLOR_ALERT = 0xFFB42318;
 
     private static MainActivity activeInstance;
 
@@ -42,8 +46,39 @@ public class MainActivity extends Activity {
     private Button inputDeviceButton;
     private TextView inputDeviceInfoText;
     private Button showPositionsButton;
-    private TextView batteryText;
+    /** 제목과 값이 한 쌍으로 움직인다. 전류 칸은 제목이 충전 속도를 말한다. */
+    private static final class BatteryCell {
+        final TextView caption;
+        final TextView value;
+
+        BatteryCell(TextView caption, TextView value) {
+            this.caption = caption;
+            this.value = value;
+        }
+
+        void set(String text, int color) {
+            value.setText(text);
+            value.setTextColor(color);
+            caption.setTextColor(color);
+        }
+    }
+
+    private BatteryCell batteryTypeCell;
+    private BatteryCell batteryCurrentCell;
+    private BatteryCell batteryTempCell;
     private Button batteryOverlayButton;
+
+    /** 전류는 계속 변한다. 화면에 떠 있는 동안은 살아 있는 값이어야 한다. */
+    private static final long BATTERY_REFRESH_MS = 2000L;
+    private final android.os.Handler batteryHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable batteryTick = new Runnable() {
+        @Override
+        public void run() {
+            updateBatteryCard();
+            batteryHandler.postDelayed(this, BATTERY_REFRESH_MS);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -85,6 +120,76 @@ public class MainActivity extends Activity {
         activeInstance = this;
         TouchAccessibilityService.setConfigurationActive(true);
         renderMappings();
+        batteryHandler.removeCallbacks(batteryTick);
+        batteryHandler.postDelayed(batteryTick, BATTERY_REFRESH_MS);
+    }
+
+    /** 값 하나를 담는 칸. 제목은 작게 위에, 값은 굵게 아래에. */
+    private BatteryCell addBatteryCell(LinearLayout parent, String caption) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(android.view.Gravity.CENTER);
+        cell.setPadding(dp(8), dp(10), dp(8), dp(10));
+        cell.setBackground(rounded(COLOR_SURFACE, dp(8)));
+
+        TextView captionView = new TextView(this);
+        captionView.setText(caption);
+        captionView.setTextSize(11f);
+        captionView.setTextColor(COLOR_MUTED);
+        captionView.setGravity(android.view.Gravity.CENTER);
+        cell.addView(captionView);
+
+        TextView value = new TextView(this);
+        value.setTextSize(16f);
+        value.setTypeface(null, android.graphics.Typeface.BOLD);
+        value.setGravity(android.view.Gravity.CENTER);
+        value.setTextColor(COLOR_TEXT);
+        cell.addView(value);
+
+        LinearLayout.LayoutParams params =
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        params.setMargins(dp(2), 0, dp(2), 0);
+        parent.addView(cell, params);
+        return new BatteryCell(captionView, value);
+    }
+
+    /** 충전 속도 단계별 색. */
+    private static int speedColor(int level) {
+        switch (level) {
+            case BatteryReading.SPEED_DRAINING:
+                return COLOR_ALERT;
+            case BatteryReading.SPEED_SLOW:
+                return COLOR_WARN;
+            case BatteryReading.SPEED_NORMAL:
+                // 일반 충전은 좋지도 나쁘지도 않다. 색으로 부르지 않는다.
+                return COLOR_TEXT;
+            case BatteryReading.SPEED_FAST:
+                return COLOR_OK;
+            case BatteryReading.SPEED_SUPER:
+                return COLOR_PRIMARY;
+            default:
+                return COLOR_MUTED;
+        }
+    }
+
+    private void updateBatteryCard() {
+        if (batteryCurrentCell == null) {
+            return;
+        }
+        BatteryReading reading = BatteryReading.read(this);
+
+        // 꽂혔지만 충전이 멈춘 상태는 초록도 회색도 아니다.
+        batteryTypeCell.set(reading.chargerLabel(),
+                reading.isPluggedButIdle() ? COLOR_WARN
+                        : reading.charging ? COLOR_OK : COLOR_MUTED);
+
+        // 전류 칸은 제목이 충전 속도를 말하고 색이 그 단계를 나타낸다.
+        int speed = reading.chargeSpeedLevel();
+        batteryCurrentCell.caption.setText(reading.chargeSpeedLabel());
+        batteryCurrentCell.set(reading.currentValueText(), speedColor(speed));
+
+        batteryTempCell.set(reading.temperatureText(),
+                reading.isHot() ? COLOR_ALERT : reading.isWarm() ? COLOR_WARN : COLOR_OK);
     }
 
     @Override
@@ -93,6 +198,7 @@ public class MainActivity extends Activity {
             activeInstance = null;
         }
         TouchAccessibilityService.setConfigurationActive(false);
+        batteryHandler.removeCallbacks(batteryTick);
         super.onPause();
     }
 
@@ -202,13 +308,13 @@ public class MainActivity extends Activity {
         setupPanelButton.setOnClickListener(view -> startPositionSetup());
         setupActions.addView(setupPanelButton, utilityButtonParams());
 
-        batteryText = new TextView(this);
-        batteryText.setTextSize(15f);
-        batteryText.setTextColor(COLOR_TEXT);
-        batteryText.setPadding(dp(14), dp(12), dp(14), dp(12));
-        batteryText.setBackground(rounded(COLOR_SURFACE, dp(8)));
-        LinearLayout.LayoutParams batteryParams = matchWidthParams();
-        root.addView(batteryText, batteryParams);
+        LinearLayout batteryRow = new LinearLayout(this);
+        batteryRow.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(batteryRow, matchWidthParams());
+
+        batteryTypeCell = addBatteryCell(batteryRow, "전원");
+        batteryCurrentCell = addBatteryCell(batteryRow, "전류");
+        batteryTempCell = addBatteryCell(batteryRow, "온도");
 
         batteryOverlayButton = makeButton("", 0xFFF1F5F9, COLOR_TEXT);
         batteryOverlayButton.setOnClickListener(view -> {
@@ -388,11 +494,7 @@ public class MainActivity extends Activity {
         if (showPositionsButton != null) {
             showPositionsButton.setText(positionButtonLabel());
         }
-        if (batteryText != null) {
-            BatteryReading reading = BatteryReading.read(this);
-            batteryText.setText("충전 " + reading.currentText() + " · 배터리 " + reading.temperatureText());
-            batteryText.setTextColor(reading.isHot() ? 0xFFB42318 : COLOR_TEXT);
-        }
+        updateBatteryCard();
         if (batteryOverlayButton != null) {
             batteryOverlayButton.setText(TouchAccessibilityService.isBatteryOverlayVisible()
                     ? "배터리 표시 켜짐" : "배터리 표시 꺼짐");

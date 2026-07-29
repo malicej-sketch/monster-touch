@@ -2881,13 +2881,61 @@ public class TouchAccessibilityService extends AccessibilityService {
         mainHandler.postDelayed(batteryTickRunnable, BATTERY_REFRESH_MS);
     }
 
+    /** 어두운 배경 위에 올라가므로 메인 화면보다 밝은 색을 쓴다. */
+    private static final int OVERLAY_OK = 0xFF5BD98A;
+    private static final int OVERLAY_WARN = 0xFFFFC46B;
+    private static final int OVERLAY_ALERT = 0xFFFF6B6B;
+    private static final int OVERLAY_MUTED = 0xFFB9C2CC;
+    private static final int OVERLAY_FAST = 0xFF7AB8FF;
+
+    private static int overlaySpeedColor(int level) {
+        switch (level) {
+            case BatteryReading.SPEED_DRAINING:
+                return OVERLAY_ALERT;
+            case BatteryReading.SPEED_SLOW:
+                return OVERLAY_WARN;
+            case BatteryReading.SPEED_NORMAL:
+                // 일반 충전은 좋지도 나쁘지도 않다. 색으로 부르지 않는다.
+                return 0xFFFFFFFF;
+            case BatteryReading.SPEED_FAST:
+                return OVERLAY_OK;
+            case BatteryReading.SPEED_SUPER:
+                return OVERLAY_FAST;
+            default:
+                return OVERLAY_MUTED;
+        }
+    }
+
+    private static void appendColored(android.text.SpannableStringBuilder builder,
+                                      String text, int color) {
+        int start = builder.length();
+        builder.append(text);
+        builder.setSpan(new android.text.style.ForegroundColorSpan(color),
+                start, builder.length(), android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+
     private void updateBatteryOverlayText() {
         if (batteryOverlayText == null) {
             return;
         }
         BatteryReading reading = BatteryReading.read(this);
-        batteryOverlayText.setText(reading.currentText() + "   " + reading.temperatureText());
-        batteryOverlayText.setTextColor(reading.isHot() ? 0xFFFF6B6B : 0xFFFFFFFF);
+
+        // 세 값이 각자 자기 상태를 색으로 말한다. 주행 중에는 숫자보다 색이 먼저 읽힌다.
+        android.text.SpannableStringBuilder line = new android.text.SpannableStringBuilder();
+        appendColored(line, reading.chargerLabel(),
+                reading.isPluggedButIdle() ? OVERLAY_WARN
+                        : reading.charging ? OVERLAY_OK : OVERLAY_MUTED);
+        line.append("  ");
+        int speedColor = overlaySpeedColor(reading.chargeSpeedLevel());
+        if (reading.isPluggedIn()) {
+            appendColored(line, reading.chargeSpeedLabel() + " ", speedColor);
+        }
+        appendColored(line, reading.currentValueText(), speedColor);
+        line.append("  ");
+        appendColored(line, reading.temperatureText(),
+                reading.isHot() ? OVERLAY_ALERT : reading.isWarm() ? OVERLAY_WARN : OVERLAY_OK);
+
+        batteryOverlayText.setText(line);
     }
 
     private void hideBatteryOverlay() {
